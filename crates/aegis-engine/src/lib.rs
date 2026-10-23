@@ -8,6 +8,7 @@ pub mod model;
 pub mod operators;
 pub mod parser;
 pub mod transforms;
+pub mod variables;
 
 pub use compile::{load_rules, LoadOptions};
 pub use error::{EngineError, LoadError};
