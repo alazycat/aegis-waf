@@ -206,7 +206,24 @@ fn normalize_path(input: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    proptest! {
+        #[test]
+        fn url_decode_never_panics(input in ".*") {
+            let _ = Transform::UrlDecode.apply(&input);
+            let _ = Transform::UrlDecodeUni.apply(&input);
+        }
+
+        #[test]
+        fn normalize_path_idempotent(input in ".*") {
+            let once = Transform::NormalizePath.apply(&input).into_owned();
+            let twice = Transform::NormalizePath.apply(&once).into_owned();
+            prop_assert_eq!(once, twice);
+        }
+    }
 
     #[test]
     fn lowercase_and_trim() {

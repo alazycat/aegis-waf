@@ -95,7 +95,16 @@ fn ends_with_unescaped_backslash(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    proptest! {
+        #[test]
+        fn scanner_never_panics(input in ".*") {
+            let _ = split_logical_lines(&input);
+        }
+    }
 
     #[test]
     fn joins_backslash_continuations() {
