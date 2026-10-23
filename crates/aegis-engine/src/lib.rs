@@ -2,6 +2,7 @@
 
 //! Pure, synchronous WAF rule engine.
 
+pub mod audit;
 pub mod compile;
 pub mod error;
 pub mod eval;
