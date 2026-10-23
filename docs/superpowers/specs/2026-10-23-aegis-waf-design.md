@@ -288,7 +288,7 @@ pub struct CompiledRules {
 | `max_header_bytes` | 65536 | 超出返回 431 |
 | `max_uri_bytes` | 8192 | 超出返回 414 |
 | `max_body_bytes` | 1048576 | 超出返回 413 |
-| `header_read_timeout_ms` | 10000 | 超出返回 408 |
+| `header_read_timeout_ms` | 10000 | 超出关闭连接 |
 | `body_read_timeout_ms` | 15000 | 超出返回 408 |
 | `upstream.connect_timeout_ms` | 3000 | 失败返回 502 |
 | `upstream.total_timeout_ms` | 30000 | 失败返回 504 |
@@ -299,7 +299,7 @@ pub struct CompiledRules {
 |---|---|
 | 规则拦截 | 规则 `status`，默认 403 |
 | 请求体/头/URI 超限 | 413 / 431 / 414 |
-| 读取超时 | 408 |
+| 请求体读取超时 | 408 |
 | 上游连接失败或无效响应 | 502 |
 | 上游超时 | 504 |
 | 引擎内部错误且 `on_error: block` | 500 |
@@ -345,7 +345,7 @@ pub struct CompiledRules {
 
 ### 7.2 热重载
 
-1. 读取配置中 `rules.files` 列出的文件（glob 展开，按字典序）。
+1. 按 `rules.files` 的配置顺序读取文件；单个 glob 内部按字典序展开；重复文件只保留第一次出现。
 2. 解析并编译全部文件；任一错误则整体失败。
 3. 成功后替换 `ArcSwap<CompiledRules>`，规则版本号加 1，记录加载时间。
 4. 进行中的请求继续使用旧快照；新请求使用新快照。
