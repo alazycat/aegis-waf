@@ -22,6 +22,15 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+性能基准：
+
+```bash
+cargo bench -p aegis-engine --bench engine
+bash scripts/bench_e2e.sh
+```
+
+结果与分析见 [docs/benchmarks.md](docs/benchmarks.md)。
+
 ## 运行
 
 ```bash
@@ -94,6 +103,7 @@ AI 不进入请求路径，不影响转发延迟。
 - [设计文档](docs/superpowers/specs/2026-10-23-aegis-waf-design.md)
 - [实现计划](docs/superpowers/plans/2026-10-23-aegis-waf-v0.1.md)
 - [兼容性报告](docs/compatibility.md)
+- [性能基准](docs/benchmarks.md)
 
 ## 许可证
 
