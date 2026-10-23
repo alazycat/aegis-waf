@@ -370,9 +370,9 @@ bash scripts/bench_e2e.sh
 - 每个变体都会对扫描范围内的值应用变换；body 很大且变体很多时，预筛成本会上升。
   后续可以按“规则是否真的需要 body”进一步缩小变体扫描范围，或对大 body 做采样策略。
 
-## 13. 真实 CRS 子集覆盖率（含响应阶段）
+## 13. 真实 CRS 子集覆盖率（含文件/集合/日志阶段）
 
-- 日期：2026-10-23
+- 日期：2026-10-24
 - CRS：`coreruleset/coreruleset`，commit `58ff33b`（v4.31.0-dev）
 - 规则文件：`crs-setup.conf.example` + 18 个 `REQUEST-*.conf` + 9 个 `RESPONSE-*.conf`
 - 加载方式：`lenient: true`，不支持的变量/算子/动作/阶段会被跳过
@@ -386,65 +386,69 @@ bash scripts/bench_e2e.sh
 | 请求文件 | 28 |
 | 可解析文件 | 28 |
 | `SecRule`/`SecAction` 指令 | 693 |
-| 编译成功规则 | 541（78.1%） |
-| 跳过的规则指令 | 160（23.1%） |
+| 编译成功规则 | 599（86.4%） |
+| 跳过的规则指令 | 102（14.6%） |
 | `SecDefaultAction` | 5 |
-| 阶段分组 | 511 |
+| 阶段分组 | 558 |
 
 剩余跳过的主要原因是引擎尚未支持的：
 
-- `FILES` / `FILES_NAMES` / multipart 文件变量；
-- `@pmFromFile`；
-- `MATCHED_VARS`、持久化集合（`ip.`/`session.`）等变量；
-- Phase 5 日志规则；
-- 部分 CRS 专属动作/变换。
+- 变量计数语法（`&TX`、`&ARGS`、`&REQUEST_HEADERS`、`&MULTIPART_PART_HEADERS`），
+  主要集中在 `REQUEST-901-INITIALIZATION.conf` 的初始化检查；
+- `MULTIPART_PART_HEADERS`、`REQBODY_PROCESSOR`、`UNIQUE_ID` 等变量；
+- `@validateUtf8Encoding`、`@validateUrlEncoding` 算子；
+- 包含上述不支持项的链会整链跳过。
+
+未知动作与 `ctl` 在 `lenient` 模式下会被忽略，不会导致规则被跳过。
 
 ### 13.2 预筛覆盖率
 
 | 指标 | 数值 |
 |---|---:|
-| 分组总数 | 511 |
-| 预筛分组 | 37（7.2%） |
-| 其中 AC | 28 组 / 39 规则 |
+| 分组总数 | 558 |
+| 预筛分组 | 42（7.5%） |
+| 其中 AC | 33 组 / 44 规则 |
 | 其中 RegexSet | 9 组 / 11 规则 |
-| 规则总数（按分组统计） | 541 |
-| 预筛规则 | 50（9.2%） |
-| 非 `SecAction` 算子的分组 | 505 |
-| 非 `SecAction` 算子的预筛分组 | 37（7.3%） |
-| **非 TX 算子分组** | **283** |
-| **非 TX 算子预筛分组** | **37（13.1%）** |
-| **非 TX 算子规则** | **311** |
-| **非 TX 算子预筛规则** | **50（16.1%）** |
+| 规则总数（按分组统计） | 599 |
+| 预筛规则 | 55（9.2%） |
+| 非 `SecAction` 算子的分组 | 550 |
+| 非 `SecAction` 算子的预筛分组 | 42（7.6%） |
+| **非 TX 算子分组** | **321** |
+| **非 TX 算子预筛分组** | **42（13.1%）** |
+| **非 TX 算子规则** | **360** |
+| **非 TX 算子预筛规则** | **55（15.3%）** |
 
 分组原因分解：
 
 | 原因 | 分组 | 规则 |
 |---|---:|---:|
-| AC 字面量 | 28 | 39 |
+| AC 字面量 | 33 | 44 |
 | RegexSet | 9 | 11 |
-| `SecAction` 无条件规则 | 6 | 6 |
-| 含 TX 变量（异常评分） | 222 | 224 |
-| 响应变量规则（Phase 3/4） | 54 | 55 |
-| 算子取反 | 9 | 9 |
+| `SecAction` 无条件规则 | 8 | 8 |
+| 含 TX 变量（异常评分） | 229 | 231 |
+| 响应变量规则（Phase 3/4/5） | 61 | 62 |
+| 算子取反 | 10 | 10 |
 | 匹配空字符串的 regex | 5 | 9 |
-| 小 regex 集合（< 8 个模式） | 164 | 172 |
+| 小 regex 集合（< 8 个模式） | 181 | 199 |
 | `REMOTE_ADDR` 规则 | 1 | 3 |
-| 其他不可预筛算子 | 13 | 13 |
+| 其他不可预筛算子 | 21 | 22 |
 
 ### 13.3 解释
 
-- **总体覆盖率低的主因仍是 TX 异常评分规则**：222 个分组只读写 `TX` 做数值累计/比较，
+- **总体覆盖率低的主因仍是 TX 异常评分规则**：229 个分组只读写 `TX` 做数值累计/比较，
   没有可提取的请求字面量；它们是廉价的整数比较，逐条求值成本很低。
-- **响应阶段规则（54 组 / 55 规则）** 使用 `RESPONSE_STATUS`、`RESPONSE_HEADERS`、
-  `RESPONSE_BODY` 等变量，不在请求预筛范围内；代理在收到上游响应后执行 Phase 3/4。
-- 去掉 TX 和响应规则后，非 TX 请求算子规则的预筛覆盖率约为 **16.1%**。
-  剩余未预筛的主要是小 regex 集合（172 条，同一变换变体内 < 8 个模式），
+- **响应阶段规则（61 组 / 62 规则）** 使用 `RESPONSE_STATUS`、`RESPONSE_HEADERS`、
+  `RESPONSE_BODY` 等变量，不在请求预筛范围内；代理在收到上游响应后执行 Phase 3/4/5。
+- 去掉 TX 和响应规则后，非 TX 请求算子规则的预筛覆盖率约为 **15.3%**。
+  剩余未预筛的主要是小 regex 集合（199 条，同一变换变体内 < 8 个模式），
   按第 12 节阈值逐条求值；其次是取反算子、空匹配 regex、`REMOTE_ADDR` 等。
 - 如果把 RegexSet 阈值降到 1，预筛覆盖会显著上升，但小规则集会退化；
   当前阈值 8 是性能与覆盖率的折中。
-- **78.1% 的 CRS 规则指令已能编译**，比上一轮（36.4%）大幅提升，主要来自：
-  新增变量、libinjection、capture、ctl 子集、Phase 3/4。
-  剩余 23.1% 主要是 multipart/FILES、`@pmFromFile`、持久化集合和 Phase 5。
+- **86.4% 的 CRS 规则指令已能编译**，比上一轮（78.1%）提升 8.3 个百分点，主要来自：
+  `FILES`/multipart、`@pmFromFile`、`MATCHED_VARS`、持久化集合与 `initcol`、
+  Phase 5/`skipAfter`、新增变换、`t:none` 与大小写不敏感的 `@pm`。
+  剩余 14.6% 主要是变量计数语法、multipart 分部头变量、`REQBODY_PROCESSOR`/
+  `UNIQUE_ID` 以及两个校验算子。
 
 ### 13.4 局限
 
@@ -452,6 +456,8 @@ bash scripts/bench_e2e.sh
 - `lenient: true` 会跳过不支持的特性，可能导致部分规则语义不完整。
 - 响应体检测仅在 `Content-Length` 存在且不超过 `max_response_body_bytes` 时执行；
   chunked 或超大响应只做 Phase 3 头检测，并直接透传响应体。
+- Phase 5 在响应已生成后执行；其破坏性决策不改变返回给客户端的响应，
+  但会反映在审计事件的决策字段中。
 - CRS 规则来自外部仓库，版本更新后数字会变化。
 - 覆盖率是静态统计，不等于运行时命中率或误报率。
 
@@ -491,7 +497,7 @@ bash scripts/bench_e2e.sh
 
 ### 14.5 响应 Phase 3/4
 
-- 引擎新增 Phase 3（响应头）与 Phase 4（响应体）；Phase 5 仍跳过。
+- 引擎新增 Phase 3（响应头）与 Phase 4（响应体）；Phase 5 在下一轮加入（见第 15 节）。
 - 代理在收到上游响应后：
   1. 执行 Phase 3（`RESPONSE_STATUS` / `RESPONSE_HEADERS`）；
   2. 若 `Content-Length` 存在且 ≤ `max_response_body_bytes`，缓冲响应体并执行 Phase 4；
@@ -504,3 +510,33 @@ bash scripts/bench_e2e.sh
 - `cargo fmt --check` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
 - 新增 `crates/aegis-proxy/tests/proxy_response_integration.rs` 覆盖 Phase 3/4
   和响应体超限跳过逻辑。
+
+## 15. CRS 兼容性扩展（2026-10-24）
+
+### 15.1 新增能力
+
+- **multipart/FILES**：内置 `multipart/form-data` 解析，提供 `FILES`、`FILES_NAMES`、
+  `FILES_SIZES`、`FILES_COMBINED_SIZE`；`FILES_TMPNAMES` 为空（不落临时文件）。
+- **`@pmFromFile`**：按规则文件相对路径读取词表，忽略空行与 `#` 注释；大小写不敏感。
+  `@pm` 与 `@pmFromFile` 统一为大小写不敏感匹配，预筛也按小写变体建立。
+- **持久化集合**：`IP`、`SESSION`、`USER`、`GLOBAL` 变量，`initcol` 动作，
+  以及 `setvar:ip.`/`session.`/`user.`/`global.` 作用域；代理进程内共享
+  `MemoryCollectionStore`，跨请求保留。
+- **Phase 5 与 `skipAfter`**：Phase 5 在响应处理完成后执行；`skipAfter:<label>`
+  跳到当前阶段对应 `SecMarker` 之后。
+- **`MATCHED_VARS`**：当前简化为上一规则匹配的变量名。
+- **新增变换**：`jsDecode`、`cssDecode`、`cmdLine`、`utf8toUnicode`、
+  `escapeSeqDecode`、`removeWhitespace`、`replaceComments`、`removeCommentsChar`、
+  `normalizePathWin`、`length`、`sha1`、`hexEncode`；`t:none` 清除继承的默认变换。
+
+### 15.2 CRS 覆盖变化
+
+- 可编译 `SecRule`/`SecAction` 从 **541（78.1%）** 提升到 **599（86.4%）**。
+- 阶段分组从 511 增加到 558；可预筛规则 55 条（9.2%）。
+- 详细数字与原因分解见第 13 节。
+
+### 15.3 验证
+
+- 149 个测试全部通过（引擎 112，代理 37）。
+- `cargo fmt --check` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+- `bash scripts/bench_crs.sh` 可复现第 13 节的数字。

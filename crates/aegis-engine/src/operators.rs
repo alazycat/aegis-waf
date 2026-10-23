@@ -30,7 +30,10 @@ impl CompiledOperator {
             Self::Contains(needle) => input.contains(needle),
             Self::BeginsWith(prefix) => input.starts_with(prefix),
             Self::EndsWith(suffix) => input.ends_with(suffix),
-            Self::Pm(phrases) => phrases.iter().any(|phrase| input.contains(phrase)),
+            Self::Pm(phrases) => {
+                let haystack = input.to_ascii_lowercase();
+                phrases.iter().any(|phrase| haystack.contains(phrase))
+            }
             Self::IpMatch(networks) => input
                 .parse::<IpAddr>()
                 .map(|address| networks.iter().any(|network| network.contains(&address)))
@@ -93,6 +96,12 @@ mod tests {
         assert!(CompiledOperator::EndsWith("cd".into()).matches("abcd"));
         assert!(CompiledOperator::Within("abcd".into()).matches("bc"));
         assert!(CompiledOperator::Pm(vec!["x".into(), "bc".into()]).matches("abcd"));
+    }
+
+    #[test]
+    fn pm_is_case_insensitive() {
+        assert!(CompiledOperator::Pm(vec!["sqlmap".into()]).matches("SQLMAP/1.0"));
+        assert!(CompiledOperator::Pm(vec!["bc".into()]).matches("ABCD"));
     }
 
     #[test]

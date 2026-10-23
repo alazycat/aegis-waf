@@ -6,13 +6,14 @@ Rust 编写的反向代理 Web 应用防火墙（WAF）v0.1。
 
 - HTTP/1.1 反向代理
 - ModSecurity `SecRule` 核心子集
-- Phase 1-4：请求头/URI/参数/Cookie、请求体、响应头、响应体
+- Phase 1-5：请求头/URI/参数/Cookie、请求体、响应头、响应体、日志阶段
 - 扩展变量：`REQUEST_LINE`、`REQUEST_BASENAME`、`REQUEST_COOKIES_NAMES`、`XML:/*`、
-  `MATCHED_VAR`、`RESPONSE_STATUS`、`RESPONSE_BODY`、`ARGS:name` 等
+  `MATCHED_VAR`、`MATCHED_VARS`、`FILES`、`IP`/`SESSION`/`USER`/`GLOBAL`、
+  `RESPONSE_STATUS`、`RESPONSE_BODY`、`ARGS:name` 等
 - `deny`/`block`/`allow`/`pass`、`status`、`msg`、`severity`、`tag`、`logdata`
-- 变换、正则/字符串/IP/数值算子、`chain`、`capture`、`ctl` 子集
-- libinjection：`@detectSQLi`、`@detectXSS`（纯 Rust 移植）
-- TX 变量、`setvar`、`MATCHED_VAR` 与宏展开，可表达 CRS 风格异常评分
+- 变换、正则/字符串/IP/数值算子、`chain`、`capture`、`skipAfter`、`ctl` 子集
+- `@pmFromFile`（大小写不敏感）、libinjection：`@detectSQLi`、`@detectXSS`（纯 Rust 移植）
+- TX 变量、`setvar`、持久化集合（内存）、`MATCHED_VAR` 与宏展开，可表达 CRS 风格异常评分
 - 规则热重载（管理 API 与 Unix `SIGHUP`）
 - 变量提取缓存与 Aho-Corasick/RegexSet 预筛（含 regex 字面量与变换感知）
 - JSON Lines 审计，有界队列，丢弃计数
@@ -96,11 +97,12 @@ AI 不进入请求路径，不影响转发延迟。
 
 - 响应体检测仅限已知 `Content-Length` 且不超过上限；chunked/超大响应只做响应头检测
 - 不终止 TLS，不支持 HTTP/2
-- 不解析 multipart 表单，`FILES` / `FILES_NAMES` 未实现
 - 不完整支持 OWASP CRS，详见 `docs/compatibility.md`
-- 不支持 `@pmFromFile`、`MATCHED_VARS`、持久化集合、Phase 5、完整 `ctl`
 - `ctl` 仅支持 `auditEngine`、`ruleEngine`、`ruleRemoveById`、`ruleRemoveByTag`
+- 持久化集合仅内存实现，无 TTL/Redis 后端
 - XML 变量提取所有元素文本/属性；复杂 XML 选择器未实现
+- 不支持 `multimatch`、变量计数（`&ARGS`）、集合排除正则
+- 响应压缩内容不解压后检测
 - 变量取反当前按值排除，而非按变量项排除
 - 头部大小限制在 hyper 解析后近似统计
 - `on_error` 为未来引擎内部错误预留；当前引擎求值无可恢复错误路径

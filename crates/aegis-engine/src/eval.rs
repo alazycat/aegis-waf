@@ -2,13 +2,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::collections::SharedCollectionStore;
 use crate::error::EngineError;
 use crate::model::{
     CompiledOperator, CompiledRule, CompiledRules, CtlAction, Disruptive, Phase, Prefilter,
-    PrefilterHits, PrefilterVariant, RuleEngineMode, RuleGroup, SetVar, SetVarOp,
+    PrefilterHits, PrefilterVariant, RuleEngineMode, RuleGroup, SetVar, SetVarOp, SetVarScope,
 };
 use crate::variables::request::{RequestContext, RequestView};
-use crate::variables::tx::expand_macros;
+use crate::variables::tx::expand_macros_with_remote;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -57,18 +58,27 @@ pub struct EvaluationState {
     enforce: bool,
     removed_rule_ids: HashSet<u32>,
     removed_tags: HashSet<String>,
+    skip_until: Option<usize>,
 }
 
 impl EvaluationState {
     pub fn new(view: &RequestView<'_>) -> Self {
+        Self::new_with_store(
+            view,
+            std::sync::Arc::new(crate::collections::MemoryCollectionStore::new()),
+        )
+    }
+
+    pub fn new_with_store(view: &RequestView<'_>, collections: SharedCollectionStore) -> Self {
         Self {
-            context: RequestContext::new(view),
+            context: RequestContext::new_with_store(view, collections),
             decision: Decision::Pass,
             matched: Vec::new(),
             audit_enabled: true,
             enforce: true,
             removed_rule_ids: HashSet::new(),
             removed_tags: HashSet::new(),
+            skip_until: None,
         }
     }
 
@@ -96,11 +106,13 @@ impl EvaluationState {
         if self.decision.is_decisive() {
             return;
         }
+        self.skip_until = None;
         let groups = match phase {
             Phase::Phase1 => &rules.phase1,
             Phase::Phase2 => &rules.phase2,
             Phase::Phase3 => &rules.phase3,
             Phase::Phase4 => &rules.phase4,
+            Phase::Phase5 => &rules.phase5,
         };
         let prefilter_hits = rules
             .prefilter
@@ -111,6 +123,12 @@ impl EvaluationState {
                 break;
             }
             let first = first_rule(group);
+            if let Some(limit) = self.skip_until {
+                if first.sequence <= limit {
+                    continue;
+                }
+                self.skip_until = None;
+            }
             if self.removed_rule_ids.contains(&first.id)
                 || first
                     .actions
@@ -144,6 +162,7 @@ impl EvaluationState {
                     if let Some(hit) = self.rule_matches(rule) {
                         self.apply_hit_context(rule, &hit);
                         self.apply_actions(rule);
+                        self.apply_skip_after(rules, rule);
                     }
                 }
                 RuleGroup::Chain(chain) => {
@@ -163,6 +182,11 @@ impl EvaluationState {
                             if self.decision.is_decisive() {
                                 break;
                             }
+                        }
+                        if let Some(rule) =
+                            chain.iter().find(|rule| rule.actions.skip_after.is_some())
+                        {
+                            self.apply_skip_after(rules, rule);
                         }
                     }
                 }
@@ -265,7 +289,16 @@ impl EvaluationState {
         self.apply_disruptive(rule);
     }
 
+    fn expand_template(&self, template: &str) -> String {
+        let remote_addr = self.context.remote_addr().to_string();
+        expand_macros_with_remote(template, self.context.tx(), Some(&remote_addr))
+    }
+
     fn apply_non_disruptive(&mut self, rule: &CompiledRule) {
+        for (collection, template) in &rule.actions.init_collections {
+            let key = self.expand_template(template);
+            self.context.set_collection_key(collection, key);
+        }
         for setvar in &rule.actions.setvars {
             self.apply_setvar(setvar);
         }
@@ -276,12 +309,12 @@ impl EvaluationState {
             .actions
             .msg
             .as_ref()
-            .map(|template| expand_macros(template, self.context.tx()));
+            .map(|template| self.expand_template(template));
         let logdata = rule
             .actions
             .logdata
             .as_ref()
-            .map(|template| expand_macros(template, self.context.tx()));
+            .map(|template| self.expand_template(template));
         self.matched.push(RuleMatch {
             id: rule.id,
             msg,
@@ -290,6 +323,14 @@ impl EvaluationState {
             logdata,
             log: rule.actions.log,
         });
+    }
+
+    fn apply_skip_after(&mut self, rules: &CompiledRules, rule: &CompiledRule) {
+        if let Some(label) = &rule.actions.skip_after {
+            if let Some(sequence) = rules.markers.get(label) {
+                self.skip_until = Some(*sequence);
+            }
+        }
     }
 
     fn apply_ctl(&mut self, ctl: &CtlAction) {
@@ -317,7 +358,7 @@ impl EvaluationState {
                     .actions
                     .msg
                     .as_ref()
-                    .map(|template| expand_macros(template, self.context.tx()));
+                    .map(|template| self.expand_template(template));
                 self.decision = Decision::Block {
                     status: *status,
                     rule_id: rule.id,
@@ -332,44 +373,90 @@ impl EvaluationState {
     }
 
     fn apply_setvar(&mut self, setvar: &SetVar) {
+        let collection = match setvar.scope {
+            SetVarScope::Tx => {
+                match &setvar.op {
+                    SetVarOp::Assign(template) => {
+                        let value = self.expand_template(template);
+                        self.context.tx_mut().set(&setvar.name, value);
+                    }
+                    SetVarOp::Add(template) => {
+                        let delta = macro_integer(template, &self.context);
+                        let current = self
+                            .context
+                            .tx()
+                            .get(&setvar.name)
+                            .and_then(|value| value.parse::<i64>().ok())
+                            .unwrap_or(0);
+                        self.context
+                            .tx_mut()
+                            .set(&setvar.name, (current + delta).to_string());
+                    }
+                    SetVarOp::Sub(template) => {
+                        let delta = macro_integer(template, &self.context);
+                        let current = self
+                            .context
+                            .tx()
+                            .get(&setvar.name)
+                            .and_then(|value| value.parse::<i64>().ok())
+                            .unwrap_or(0);
+                        self.context
+                            .tx_mut()
+                            .set(&setvar.name, (current - delta).to_string());
+                    }
+                    SetVarOp::Delete => {
+                        self.context.tx_mut().remove(&setvar.name);
+                    }
+                }
+                return;
+            }
+            SetVarScope::Ip => "ip",
+            SetVarScope::Session => "session",
+            SetVarScope::User => "user",
+            SetVarScope::Global => "global",
+        };
+
         match &setvar.op {
             SetVarOp::Assign(template) => {
-                let value = expand_macros(template, self.context.tx());
-                self.context.tx_mut().set(&setvar.name, value);
+                let value = self.expand_template(template);
+                self.context.collection_set(collection, &setvar.name, value);
             }
             SetVarOp::Add(template) => {
                 let delta = macro_integer(template, &self.context);
                 let current = self
                     .context
-                    .tx()
-                    .get(&setvar.name)
+                    .collection_get(collection, &setvar.name)
                     .and_then(|value| value.parse::<i64>().ok())
                     .unwrap_or(0);
-                self.context
-                    .tx_mut()
-                    .set(&setvar.name, (current + delta).to_string());
+                self.context.collection_set(
+                    collection,
+                    &setvar.name,
+                    (current + delta).to_string(),
+                );
             }
             SetVarOp::Sub(template) => {
                 let delta = macro_integer(template, &self.context);
                 let current = self
                     .context
-                    .tx()
-                    .get(&setvar.name)
+                    .collection_get(collection, &setvar.name)
                     .and_then(|value| value.parse::<i64>().ok())
                     .unwrap_or(0);
-                self.context
-                    .tx_mut()
-                    .set(&setvar.name, (current - delta).to_string());
+                self.context.collection_set(
+                    collection,
+                    &setvar.name,
+                    (current - delta).to_string(),
+                );
             }
             SetVarOp::Delete => {
-                self.context.tx_mut().remove(&setvar.name);
+                self.context.collection_remove(collection, &setvar.name);
             }
         }
     }
 }
 
 fn macro_integer(template: &str, context: &RequestContext) -> i64 {
-    expand_macros(template, context.tx())
+    let remote_addr = context.remote_addr().to_string();
+    expand_macros_with_remote(template, context.tx(), Some(&remote_addr))
         .trim()
         .parse::<i64>()
         .unwrap_or(0)
@@ -791,11 +878,39 @@ SecRule REQUEST_METHOD "@eq GET" "id:9003,phase:1,pass"
     fn pm_rules_are_prefiltered_from_headers() {
         let rules =
             load(r#"SecRule REQUEST_HEADERS:User-Agent "@pm sqlmap nikto" "id:9005,phase:1,deny""#);
-        let evaluation = eval(&rules, "GET", "/", &[("user-agent", "sqlmap/1.0")], b"");
+        let evaluation = eval(&rules, "GET", "/", &[("user-agent", "SQLMAP/1.0")], b"");
         assert!(matches!(
             evaluation.decision,
             Decision::Block { rule_id: 9005, .. }
         ));
+    }
+
+    #[test]
+    fn pm_from_file_is_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("bad.txt");
+        std::fs::write(&data, "attack\n# comment\nscanner\n").unwrap();
+        let rules_path = dir.path().join("rules.conf");
+        std::fs::write(
+            &rules_path,
+            r#"SecRule ARGS "@pmFromFile bad.txt" "id:9006,phase:1,deny""#,
+        )
+        .unwrap();
+        let rules = load_rules(
+            &[rules_path],
+            &LoadOptions {
+                lenient: false,
+                version: 1,
+            },
+        )
+        .unwrap();
+        let blocked = eval(&rules, "GET", "/?q=ATTACK", &[], b"");
+        assert!(matches!(
+            blocked.decision,
+            Decision::Block { rule_id: 9006, .. }
+        ));
+        let passed = eval(&rules, "GET", "/?q=hello", &[], b"");
+        assert_eq!(passed.decision, Decision::Pass);
     }
 
     #[test]
@@ -1054,6 +1169,112 @@ SecRule ARGS "@contains attack" "id:3,phase:1,deny,status:403"
                 rule_id: 9302,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn skip_after_jumps_to_marker() {
+        let rules = load(
+            r#"
+SecRule ARGS "@contains skip" "id:1,phase:1,pass,skipAfter:AFTER"
+SecRule ARGS "@contains attack" "id:2,phase:1,deny,status:403"
+SecMarker AFTER
+SecRule ARGS "@contains attack" "id:3,phase:1,deny,status:401"
+"#,
+        );
+        let skipped = eval(&rules, "GET", "/?q=skip+attack", &[], b"");
+        assert!(matches!(
+            skipped.decision,
+            Decision::Block {
+                status: 401,
+                rule_id: 3,
+                ..
+            }
+        ));
+        let blocked = eval(&rules, "GET", "/?q=attack", &[], b"");
+        assert!(matches!(
+            blocked.decision,
+            Decision::Block {
+                status: 403,
+                rule_id: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn phase_five_runs_after_response() {
+        let rules = load(
+            r#"
+SecRule RESPONSE_BODY "@contains secret" "id:9401,phase:5,pass,setvar:tx.seen=1"
+SecRule TX:SEEN "@eq 1" "id:9402,phase:5,deny,status:403"
+"#,
+        );
+        let request_headers = headers(&[]);
+        let view = RequestView {
+            method: "GET",
+            uri: "/",
+            path: "/",
+            query: None,
+            protocol: "HTTP/1.1",
+            headers: &request_headers,
+            body: b"",
+            remote_addr: "127.0.0.1".parse().unwrap(),
+        };
+        let mut state = EvaluationState::new(&view);
+        let response_headers = headers(&[("content-type", "text/plain")]);
+        state.set_response_headers(200, &response_headers);
+        state.set_response_body(b"a secret value");
+        state.evaluate_phase(&rules, Phase::Phase5);
+        assert!(matches!(
+            state.decision(),
+            Decision::Block { rule_id: 9402, .. }
+        ));
+    }
+
+    #[test]
+    fn matched_vars_is_available_to_later_rules() {
+        let rules = load(
+            r#"
+SecRule ARGS "@contains secret" "id:9501,phase:1,pass"
+SecRule MATCHED_VARS "@contains ARGS" "id:9502,phase:1,deny,status:403"
+"#,
+        );
+        let evaluation = eval(&rules, "GET", "/?q=secret", &[], b"");
+        assert!(matches!(
+            evaluation.decision,
+            Decision::Block { rule_id: 9502, .. }
+        ));
+    }
+
+    #[test]
+    fn persistent_ip_collection_survives_requests() {
+        let rules = load(
+            r#"
+SecAction "id:9601,phase:1,pass,initcol:ip=%{remote_addr},setvar:ip.hits=+1"
+SecRule IP:HITS "@ge 2" "id:9602,phase:1,deny,status:403"
+"#,
+        );
+        let request_headers = headers(&[]);
+        let view = RequestView {
+            method: "GET",
+            uri: "/",
+            path: "/",
+            query: None,
+            protocol: "HTTP/1.1",
+            headers: &request_headers,
+            body: b"",
+            remote_addr: "127.0.0.1".parse().unwrap(),
+        };
+        let store = std::sync::Arc::new(crate::collections::MemoryCollectionStore::new());
+        let mut first = EvaluationState::new_with_store(&view, store.clone());
+        first.evaluate_phase(&rules, Phase::Phase1);
+        assert_eq!(first.decision(), &Decision::Pass);
+        let mut second = EvaluationState::new_with_store(&view, store);
+        second.evaluate_phase(&rules, Phase::Phase1);
+        assert!(matches!(
+            second.decision(),
+            Decision::Block { rule_id: 9602, .. }
         ));
     }
 

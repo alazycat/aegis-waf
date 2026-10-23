@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use http::HeaderMap;
 
+use crate::collections::{MemoryCollectionStore, SharedCollectionStore};
 use crate::model::{PrefilterScope, Variable};
 
 use super::tx::TxStore;
@@ -22,6 +23,13 @@ pub struct RequestView<'a> {
 }
 
 #[derive(Debug, Clone)]
+struct MultipartPart {
+    name: String,
+    filename: Option<String>,
+    data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RequestContext {
     method: String,
     uri: String,
@@ -36,17 +44,24 @@ pub struct RequestContext {
     body_text: String,
     body_len: usize,
     xml_values: Vec<String>,
+    multipart_parts: Vec<MultipartPart>,
     response_status: Option<u16>,
     response_headers: Vec<(String, String)>,
     response_body_text: String,
     response_body_len: usize,
     response_content_type: Option<String>,
     tx: TxStore,
+    collections: SharedCollectionStore,
+    collection_keys: HashMap<String, String>,
     cache: RefCell<HashMap<Variable, Arc<Vec<String>>>>,
 }
 
 impl RequestContext {
     pub fn new(view: &RequestView<'_>) -> Self {
+        Self::new_with_store(view, Arc::new(MemoryCollectionStore::new()))
+    }
+
+    pub fn new_with_store(view: &RequestView<'_>, collections: SharedCollectionStore) -> Self {
         let headers: Vec<(String, String)> = view
             .headers
             .iter()
@@ -85,14 +100,61 @@ impl RequestContext {
             body_text: String::new(),
             body_len: 0,
             xml_values: Vec::new(),
+            multipart_parts: Vec::new(),
             response_status: None,
             response_headers: Vec::new(),
             response_body_text: String::new(),
             response_body_len: 0,
             response_content_type: None,
             tx: TxStore::default(),
+            collections,
+            collection_keys: HashMap::new(),
             cache: RefCell::new(HashMap::new()),
         }
+    }
+
+    pub fn set_collection_key(&mut self, collection: &str, key: String) {
+        self.collection_keys
+            .insert(collection.to_ascii_lowercase(), key);
+        self.cache.borrow_mut().clear();
+    }
+
+    pub fn collection_key(&self, collection: &str) -> Option<&str> {
+        self.collection_keys
+            .get(&collection.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+
+    pub fn collection_get(&self, collection: &str, name: &str) -> Option<String> {
+        let collection = collection.to_ascii_lowercase();
+        let key = self.collection_key(&collection)?;
+        self.collections.get(&collection, key, name)
+    }
+
+    pub fn collection_set(&mut self, collection: &str, name: &str, value: String) {
+        let collection = collection.to_ascii_lowercase();
+        let Some(key) = self.collection_key(&collection).map(str::to_string) else {
+            return;
+        };
+        self.collections.set(&collection, &key, name, value);
+        self.cache.borrow_mut().clear();
+    }
+
+    pub fn collection_remove(&mut self, collection: &str, name: &str) {
+        let collection = collection.to_ascii_lowercase();
+        let Some(key) = self.collection_key(&collection).map(str::to_string) else {
+            return;
+        };
+        self.collections.remove(&collection, &key, name);
+        self.cache.borrow_mut().clear();
+    }
+
+    pub fn collection_entries(&self, collection: &str) -> Vec<(String, String)> {
+        let collection = collection.to_ascii_lowercase();
+        let Some(key) = self.collection_key(&collection) else {
+            return Vec::new();
+        };
+        self.collections.entries(&collection, key)
     }
 
     pub fn set_body(&mut self, body: &[u8]) {
@@ -126,6 +188,9 @@ impl RequestContext {
         } else {
             Vec::new()
         };
+        self.multipart_parts = multipart_boundary(&self.headers)
+            .map(|boundary| parse_multipart(body, &boundary))
+            .unwrap_or_default();
         self.cache.borrow_mut().clear();
     }
 
@@ -153,6 +218,10 @@ impl RequestContext {
         self.cache.borrow_mut().clear();
     }
 
+    pub fn remote_addr(&self) -> IpAddr {
+        self.remote_addr
+    }
+
     pub fn tx(&self) -> &TxStore {
         &self.tx
     }
@@ -164,7 +233,14 @@ impl RequestContext {
     pub fn extract(&self, variable: &Variable) -> Arc<Vec<String>> {
         let cacheable = !matches!(
             variable,
-            Variable::Tx(_) | Variable::MatchedVar | Variable::MatchedVarName
+            Variable::Tx(_)
+                | Variable::MatchedVar
+                | Variable::MatchedVarName
+                | Variable::MatchedVars
+                | Variable::Ip(_)
+                | Variable::Session(_)
+                | Variable::User(_)
+                | Variable::Global(_)
         );
         if cacheable {
             if let Some(values) = self.cache.borrow().get(variable) {
@@ -264,6 +340,36 @@ impl RequestContext {
             Variable::RequestCookiesNames => unique_names(&self.cookies),
             Variable::RequestBody => vec![self.body_text.clone()],
             Variable::RequestBodyLength => vec![self.body_len.to_string()],
+            Variable::Files => self
+                .multipart_parts
+                .iter()
+                .filter(|part| part.filename.is_some())
+                .map(|part| String::from_utf8_lossy(&part.data).into_owned())
+                .collect(),
+            Variable::FilesNames => self
+                .multipart_parts
+                .iter()
+                .filter(|part| part.filename.is_some())
+                .map(|part| part.name.clone())
+                .collect(),
+            Variable::FilesSizes => self
+                .multipart_parts
+                .iter()
+                .filter(|part| part.filename.is_some())
+                .map(|part| part.data.len().to_string())
+                .collect(),
+            Variable::FilesCombinedSize => vec![self
+                .multipart_parts
+                .iter()
+                .filter(|part| part.filename.is_some())
+                .map(|part| part.data.len())
+                .sum::<usize>()
+                .to_string()],
+            Variable::FilesTmpnames => Vec::new(),
+            Variable::Ip(selector) => collection_values(self, "ip", selector),
+            Variable::Session(selector) => collection_values(self, "session", selector),
+            Variable::User(selector) => collection_values(self, "user", selector),
+            Variable::Global(selector) => collection_values(self, "global", selector),
             Variable::RemoteAddr => vec![self.remote_addr.to_string()],
             Variable::MatchedVar => self
                 .tx
@@ -271,6 +377,11 @@ impl RequestContext {
                 .map(|value| vec![value.to_string()])
                 .unwrap_or_default(),
             Variable::MatchedVarName => self
+                .tx
+                .get("matched_var_name")
+                .map(|value| vec![value.to_string()])
+                .unwrap_or_default(),
+            Variable::MatchedVars => self
                 .tx
                 .get("matched_var_name")
                 .map(|value| vec![value.to_string()])
@@ -359,6 +470,24 @@ fn parse_cookies(value: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+fn collection_values(
+    context: &RequestContext,
+    collection: &str,
+    selector: &Option<String>,
+) -> Vec<String> {
+    match selector {
+        Some(name) => context
+            .collection_get(collection, name)
+            .map(|value| vec![value])
+            .unwrap_or_default(),
+        None => context
+            .collection_entries(collection)
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect(),
+    }
+}
+
 fn unique_names(pairs: &[(String, String)]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     pairs
@@ -371,6 +500,92 @@ fn unique_names(pairs: &[(String, String)]) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn multipart_boundary(headers: &[(String, String)]) -> Option<String> {
+    let content_type = headers
+        .iter()
+        .find(|(name, _)| name == "content-type")
+        .map(|(_, value)| value)?;
+    if !content_type
+        .to_ascii_lowercase()
+        .starts_with("multipart/form-data")
+    {
+        return None;
+    }
+    content_type
+        .split(';')
+        .skip(1)
+        .find_map(|part| {
+            let part = part.trim();
+            part.strip_prefix("boundary=")
+                .map(|value| value.trim_matches('"').to_string())
+        })
+        .filter(|boundary| !boundary.is_empty())
+}
+
+fn parse_multipart(body: &[u8], boundary: &str) -> Vec<MultipartPart> {
+    let delimiter = format!("--{boundary}").into_bytes();
+    let next_delimiter = format!("\r\n--{boundary}").into_bytes();
+    let mut parts = Vec::new();
+    let mut position = 0usize;
+
+    while let Some(start) = find_subslice(&body[position..], &delimiter) {
+        let mut cursor = position + start + delimiter.len();
+        if body.get(cursor..cursor + 2) == Some(b"--") {
+            break;
+        }
+        if body.get(cursor..cursor + 2) == Some(b"\r\n") {
+            cursor += 2;
+        } else if body.get(cursor..cursor + 1) == Some(b"\n") {
+            cursor += 1;
+        }
+        let Some(header_end) = find_subslice(&body[cursor..], b"\r\n\r\n") else {
+            break;
+        };
+        let headers_text = String::from_utf8_lossy(&body[cursor..cursor + header_end]);
+        let data_start = cursor + header_end + 4;
+        let Some(next) = find_subslice(&body[data_start..], &next_delimiter) else {
+            break;
+        };
+        let data_end = data_start + next;
+        if let Some((name, filename)) = parse_part_disposition(&headers_text) {
+            parts.push(MultipartPart {
+                name,
+                filename,
+                data: body[data_start..data_end].to_vec(),
+            });
+        }
+        position = data_end + 2;
+    }
+    parts
+}
+
+fn parse_part_disposition(headers: &str) -> Option<(String, Option<String>)> {
+    let disposition = headers.lines().find(|line| {
+        line.to_ascii_lowercase()
+            .starts_with("content-disposition:")
+    })?;
+    let mut name = None;
+    let mut filename = None;
+    for part in disposition.split(';').skip(1) {
+        let part = part.trim();
+        if let Some(value) = part.strip_prefix("name=") {
+            name = Some(value.trim_matches('"').to_string());
+        } else if let Some(value) = part.strip_prefix("filename=") {
+            filename = Some(value.trim_matches('"').to_string());
+        }
+    }
+    name.map(|name| (name, filename))
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn extract_xml_values(text: &str) -> Vec<String> {
@@ -619,6 +834,19 @@ mod tests {
         context.set_response_body(b"not found");
         assert_eq!(extract(&context, Variable::ResponseBody), vec!["not found"]);
         assert_eq!(extract(&context, Variable::ResponseBodyLength), vec!["9"]);
+    }
+
+    #[test]
+    fn extracts_multipart_files() {
+        let headers = header_map(&[("content-type", "multipart/form-data; boundary=X")]);
+        let mut context = context(&headers);
+        let body = b"--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nfile-content\r\n--X\r\nContent-Disposition: form-data; name=\"field\"\r\n\r\nvalue\r\n--X--\r\n";
+        context.set_body(body);
+        assert_eq!(extract(&context, Variable::Files), vec!["file-content"]);
+        assert_eq!(extract(&context, Variable::FilesNames), vec!["file"]);
+        assert_eq!(extract(&context, Variable::FilesSizes), vec!["12"]);
+        assert_eq!(extract(&context, Variable::FilesCombinedSize), vec!["12"]);
+        assert!(extract(&context, Variable::FilesTmpnames).is_empty());
     }
 
     #[test]

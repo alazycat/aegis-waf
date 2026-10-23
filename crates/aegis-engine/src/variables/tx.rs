@@ -32,6 +32,14 @@ impl TxStore {
 }
 
 pub fn expand_macros(template: &str, tx: &TxStore) -> String {
+    expand_macros_with_remote(template, tx, None)
+}
+
+pub fn expand_macros_with_remote(
+    template: &str,
+    tx: &TxStore,
+    remote_addr: Option<&str>,
+) -> String {
     let mut output = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(start) = rest.find("%{") {
@@ -43,7 +51,11 @@ pub fn expand_macros(template: &str, tx: &TxStore) -> String {
                 if let Some(value) = tx.get(tx_name) {
                     output.push_str(value);
                 }
-            } else if name == "matched_var" || name == "matched_var_name" {
+            } else if name == "remote_addr" {
+                if let Some(value) = remote_addr {
+                    output.push_str(value);
+                }
+            } else if matches!(name.as_str(), "matched_var" | "matched_var_name") {
                 if let Some(value) = tx.get(&name) {
                     output.push_str(value);
                 }
@@ -86,5 +98,9 @@ mod tests {
         assert_eq!(expand_macros("x=%{tx.missing};", &tx), "x=;");
         assert_eq!(expand_macros("%{ip.remote}", &tx), "");
         assert_eq!(expand_macros("plain", &tx), "plain");
+        assert_eq!(
+            expand_macros_with_remote("ip=%{remote_addr}", &tx, Some("127.0.0.1")),
+            "ip=127.0.0.1"
+        );
     }
 }

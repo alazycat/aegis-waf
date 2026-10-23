@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use aegis_engine::{MemoryCollectionStore, SharedCollectionStore};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -18,6 +19,7 @@ pub struct AppState {
     pub client: ProxyClient,
     pub rules: Arc<RulesManager>,
     pub audit: AuditHandle,
+    pub collections: SharedCollectionStore,
     pub started_at: Instant,
 }
 
@@ -38,6 +40,7 @@ impl AppState {
             client,
             rules,
             audit,
+            collections: Arc::new(MemoryCollectionStore::new()),
             started_at: Instant::now(),
         })
     }

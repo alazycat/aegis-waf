@@ -315,6 +315,9 @@ async fn process(
                 upstream_latency,
             );
         }
+        if !rules.phase5.is_empty() {
+            evaluate_phase(evaluation, rules, Phase::Phase5);
+        }
         let downstream_status = response_parts.status;
         Outcome {
             response: build_response(response_parts, full_body(response_body)),
@@ -325,6 +328,9 @@ async fn process(
             request_body_bytes: body_len,
         }
     } else {
+        if !rules.phase5.is_empty() {
+            evaluate_phase(evaluation, rules, Phase::Phase5);
+        }
         let downstream_status = response_parts.status;
         Outcome {
             response: build_response(response_parts, response_body.boxed()),
@@ -466,7 +472,7 @@ async fn handle(
             body: &[],
             remote_addr: peer.ip(),
         };
-        EvaluationState::new(&view)
+        EvaluationState::new_with_store(&view, state.collections.clone())
     };
 
     let outcome = process(&state, &rules, &parts, incoming, peer, &mut evaluation).await;

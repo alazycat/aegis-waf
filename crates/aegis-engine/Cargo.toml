@@ -15,6 +15,7 @@ regex-syntax.workspace = true
 aho-corasick.workspace = true
 barbacane-libinjection.workspace = true
 roxmltree.workspace = true
+sha1.workspace = true
 ipnet.workspace = true
 form_urlencoded.workspace = true
 html-escape.workspace = true

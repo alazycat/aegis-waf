@@ -255,6 +255,7 @@ fn main() {
         .chain(compiled.phase2.iter())
         .chain(compiled.phase3.iter())
         .chain(compiled.phase4.iter())
+        .chain(compiled.phase5.iter())
     {
         let (reason, rules) = classify_group(group);
         breakdown.add(reason, rules);

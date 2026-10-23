@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -69,6 +70,7 @@ pub enum Phase {
     Phase2,
     Phase3,
     Phase4,
+    Phase5,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -91,9 +93,19 @@ pub enum Variable {
     RequestCookiesNames,
     RequestBody,
     RequestBodyLength,
+    Files,
+    FilesNames,
+    FilesSizes,
+    FilesCombinedSize,
+    FilesTmpnames,
+    Ip(Option<String>),
+    Session(Option<String>),
+    User(Option<String>),
+    Global(Option<String>),
     RemoteAddr,
     MatchedVar,
     MatchedVarName,
+    MatchedVars,
     Xml(Option<String>),
     ResponseStatus,
     ResponseHeaders(Option<String>),
@@ -130,9 +142,23 @@ impl Variable {
             Self::RequestCookiesNames => "REQUEST_COOKIES_NAMES".to_string(),
             Self::RequestBody => "REQUEST_BODY".to_string(),
             Self::RequestBodyLength => "REQUEST_BODY_LENGTH".to_string(),
+            Self::Files => "FILES".to_string(),
+            Self::FilesNames => "FILES_NAMES".to_string(),
+            Self::FilesSizes => "FILES_SIZES".to_string(),
+            Self::FilesCombinedSize => "FILES_COMBINED_SIZE".to_string(),
+            Self::FilesTmpnames => "FILES_TMPNAMES".to_string(),
+            Self::Ip(None) => "IP".to_string(),
+            Self::Ip(Some(name)) => format!("IP:{name}"),
+            Self::Session(None) => "SESSION".to_string(),
+            Self::Session(Some(name)) => format!("SESSION:{name}"),
+            Self::User(None) => "USER".to_string(),
+            Self::User(Some(name)) => format!("USER:{name}"),
+            Self::Global(None) => "GLOBAL".to_string(),
+            Self::Global(Some(name)) => format!("GLOBAL:{name}"),
             Self::RemoteAddr => "REMOTE_ADDR".to_string(),
             Self::MatchedVar => "MATCHED_VAR".to_string(),
             Self::MatchedVarName => "MATCHED_VAR_NAME".to_string(),
+            Self::MatchedVars => "MATCHED_VARS".to_string(),
             Self::Xml(None) => "XML".to_string(),
             Self::Xml(Some(selector)) => format!("XML:{selector}"),
             Self::ResponseStatus => "RESPONSE_STATUS".to_string(),
@@ -162,8 +188,18 @@ pub enum SetVarOp {
     Delete,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetVarScope {
+    Tx,
+    Ip,
+    Session,
+    User,
+    Global,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetVar {
+    pub scope: SetVarScope,
     pub name: String,
     pub op: SetVarOp,
 }
@@ -200,7 +236,9 @@ pub struct CompiledActions {
     pub logdata: Option<String>,
     pub chain: bool,
     pub capture: bool,
+    pub skip_after: Option<String>,
     pub ctl: Vec<CtlAction>,
+    pub init_collections: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +252,7 @@ pub struct CompiledRule {
     pub actions: CompiledActions,
     pub unconditional: bool,
     pub prefilter: Option<RulePrefilter>,
+    pub sequence: usize,
     pub file: PathBuf,
     pub line: usize,
 }
@@ -233,6 +272,8 @@ pub struct CompiledRules {
     pub phase2: Vec<RuleGroup>,
     pub phase3: Vec<RuleGroup>,
     pub phase4: Vec<RuleGroup>,
+    pub phase5: Vec<RuleGroup>,
+    pub markers: HashMap<String, usize>,
     pub prefilter: Option<Prefilter>,
 }
 
@@ -245,6 +286,7 @@ impl CompiledRules {
             .chain(self.phase2.iter())
             .chain(self.phase3.iter())
             .chain(self.phase4.iter())
+            .chain(self.phase5.iter())
         {
             stats.total_groups += 1;
             let (first, rule_count) = match group {

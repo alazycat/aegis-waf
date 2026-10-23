@@ -78,15 +78,9 @@ SecRule ARGS "@rx b" "id:1,pass"
 }
 
 #[test]
-fn rejects_unsupported_phase_in_strict_mode() {
-    let error = load(r#"SecRule ARGS "@rx a" "id:1,phase:5,deny""#).unwrap_err();
-    assert!(error.to_string().contains("phase 5"));
-}
-
-#[test]
-fn skips_unsupported_phase_in_lenient_mode() {
-    let rules = load_lenient(r#"SecRule ARGS "@rx a" "id:1,phase:5,deny""#);
-    assert_eq!(rules.rule_count, 0);
+fn rejects_invalid_phase() {
+    let error = load(r#"SecRule ARGS "@rx a" "id:1,phase:6,deny""#).unwrap_err();
+    assert!(error.to_string().contains("invalid phase 6"));
 }
 
 #[test]
@@ -95,11 +89,13 @@ fn compiles_response_phases() {
         r#"
 SecRule RESPONSE_STATUS "@eq 500" "id:1,phase:3,deny"
 SecRule RESPONSE_BODY "@contains secret" "id:2,phase:4,deny"
+SecAction "id:3,phase:5,pass,setvar:tx.reported=1"
 "#,
     )
     .unwrap();
     assert_eq!(rules.phase3.len(), 1);
     assert_eq!(rules.phase4.len(), 1);
+    assert_eq!(rules.phase5.len(), 1);
 }
 
 #[test]
@@ -131,6 +127,21 @@ SecRule ARGS "@rx c" "id:3,phase:1,deny"
     )
     .unwrap_err();
     assert!(error.to_string().contains("chain"));
+}
+
+#[test]
+fn t_none_clears_default_transforms() {
+    let rules = load(
+        r#"
+SecDefaultAction "phase:1,pass,t:lowercase"
+SecRule ARGS "@contains attack" "id:1,t:none,deny"
+"#,
+    )
+    .unwrap();
+    let RuleGroup::Single(rule) = &rules.phase1[0] else {
+        panic!("expected single rule");
+    };
+    assert!(rule.transformations.is_empty());
 }
 
 #[test]
