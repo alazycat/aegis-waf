@@ -50,12 +50,27 @@ fn simple_rules(count: usize) -> String {
     text
 }
 
+fn regex_lowercase_rules(count: usize) -> String {
+    let mut text = String::new();
+    for index in 0..count {
+        writeln!(
+            text,
+            "SecRule ARGS \"@rx rxneedle-{index:04}\" \"id:{},phase:2,pass,t:lowercase\"",
+            30_000 + index
+        )
+        .unwrap();
+    }
+    text
+}
+
 fn bench_evaluate(c: &mut Criterion) {
     let (_example_dir, example_rules) = compile_text(&format!("{WHITELIST}\n{BASE_RULES}"));
     let (_empty_dir, empty_rules) = compile_text("");
     let (_rules100_dir, rules100) = compile_text(&simple_rules(100));
     let (_rules200_dir, rules200) = compile_text(&simple_rules(200));
     let (_rules500_dir, rules500) = compile_text(&simple_rules(500));
+    let (_regex200_dir, regex200) = compile_text(&regex_lowercase_rules(200));
+    let (_regex500_dir, regex500) = compile_text(&regex_lowercase_rules(500));
 
     let request_headers = header_map(&[("host", "bench.test"), ("user-agent", "aegis-bench/1.0")]);
     let body_headers = header_map(&[
@@ -114,6 +129,28 @@ fn bench_evaluate(c: &mut Criterion) {
         body: b"",
         remote_addr,
     };
+    let match_regex200_uri = "/search?q=rxneedle-0199";
+    let match_regex200_query = "q=rxneedle-0199";
+    let match_regex200 = RequestView {
+        method: "GET",
+        uri: match_regex200_uri,
+        path: "/search",
+        query: Some(match_regex200_query),
+        headers: &request_headers,
+        body: b"",
+        remote_addr,
+    };
+    let match_regex500_uri = "/search?q=rxneedle-0499";
+    let match_regex500_query = "q=rxneedle-0499";
+    let match_regex500 = RequestView {
+        method: "GET",
+        uri: match_regex500_uri,
+        path: "/search",
+        query: Some(match_regex500_query),
+        headers: &request_headers,
+        body: b"",
+        remote_addr,
+    };
 
     let mut group = c.benchmark_group("evaluate");
     group.warm_up_time(Duration::from_millis(500));
@@ -147,6 +184,18 @@ fn bench_evaluate(c: &mut Criterion) {
     group.bench_function("match_one_500_simple_rules", |b| {
         b.iter(|| black_box(evaluate(&rules500, &match500)))
     });
+    group.bench_function("safe_200_regex_lowercase_rules", |b| {
+        b.iter(|| black_box(evaluate(&regex200, &safe)))
+    });
+    group.bench_function("safe_500_regex_lowercase_rules", |b| {
+        b.iter(|| black_box(evaluate(&regex500, &safe)))
+    });
+    group.bench_function("match_one_200_regex_lowercase_rules", |b| {
+        b.iter(|| black_box(evaluate(&regex200, &match_regex200)))
+    });
+    group.bench_function("match_one_500_regex_lowercase_rules", |b| {
+        b.iter(|| black_box(evaluate(&regex500, &match_regex500)))
+    });
     group.finish();
 }
 
@@ -160,6 +209,11 @@ fn bench_compile(c: &mut Criterion) {
     let path500 = dir500.path().join("rules.conf");
     fs::write(&path500, simple_rules(500)).unwrap();
     let files500 = [path500];
+
+    let dir_regex500 = tempdir().unwrap();
+    let path_regex500 = dir_regex500.path().join("rules.conf");
+    fs::write(&path_regex500, regex_lowercase_rules(500)).unwrap();
+    let files_regex500 = [path_regex500];
 
     let options = LoadOptions {
         lenient: false,
@@ -175,6 +229,9 @@ fn bench_compile(c: &mut Criterion) {
     });
     group.bench_function("500_simple_rules", |b| {
         b.iter(|| black_box(load_rules(&files500, &options).unwrap()))
+    });
+    group.bench_function("500_regex_lowercase_rules", |b| {
+        b.iter(|| black_box(load_rules(&files_regex500, &options).unwrap()))
     });
     group.finish();
 }

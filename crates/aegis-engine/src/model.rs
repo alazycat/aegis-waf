@@ -27,9 +27,21 @@ impl PrefilterScope {
 
 #[derive(Debug, Clone)]
 pub struct Prefilter {
+    pub variants: Vec<PrefilterVariant>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PrefilterVariant {
     pub matcher: Arc<aho_corasick::AhoCorasick>,
     pub pattern_count: usize,
     pub scope: PrefilterScope,
+    pub transforms: Vec<Transform>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RulePrefilter {
+    pub variant: usize,
+    pub patterns: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,7 +115,7 @@ pub struct CompiledRule {
     pub transformations: Vec<Transform>,
     pub actions: CompiledActions,
     pub unconditional: bool,
-    pub prefilter_patterns: Vec<usize>,
+    pub prefilter: Option<RulePrefilter>,
     pub file: PathBuf,
     pub line: usize,
 }

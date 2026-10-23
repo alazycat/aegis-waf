@@ -4,7 +4,8 @@ use std::time::{Duration, Instant};
 
 use crate::error::EngineError;
 use crate::model::{
-    CompiledRule, CompiledRules, Disruptive, Phase, Prefilter, RuleGroup, SetVar, SetVarOp,
+    CompiledRule, CompiledRules, Disruptive, Phase, Prefilter, PrefilterVariant, RuleGroup, SetVar,
+    SetVarOp,
 };
 use crate::variables::request::{RequestContext, RequestView};
 use crate::variables::tx::expand_macros;
@@ -92,13 +93,15 @@ impl EvaluationState {
             }
             if let Some(hits) = &prefilter_hits {
                 let first = first_rule(group);
-                if !first.prefilter_patterns.is_empty()
-                    && !first
-                        .prefilter_patterns
+                if let Some(rule_prefilter) = &first.prefilter {
+                    let variant_hits = &hits[rule_prefilter.variant];
+                    if !rule_prefilter
+                        .patterns
                         .iter()
-                        .any(|id| hits.get(*id).copied().unwrap_or(false))
-                {
-                    continue;
+                        .any(|id| variant_hits.get(*id).copied().unwrap_or(false))
+                    {
+                        continue;
+                    }
                 }
             }
             match group {
@@ -266,14 +269,43 @@ fn first_rule(group: &RuleGroup) -> &CompiledRule {
     }
 }
 
-fn prefilter_hits(prefilter: &Prefilter, context: &RequestContext) -> Vec<bool> {
-    let mut hits = vec![false; prefilter.pattern_count];
-    context.for_each_prefilter_value(prefilter.scope, |value| {
-        for found in prefilter.matcher.find_iter(value.as_bytes()) {
-            hits[found.pattern().as_usize()] = true;
+fn scan_variant(variant: &PrefilterVariant, context: &RequestContext) -> Vec<bool> {
+    let mut hits = vec![false; variant.pattern_count];
+    context.for_each_prefilter_value(variant.scope, |value| {
+        if value.is_empty() {
+            return;
+        }
+        if variant.transforms.is_empty() {
+            mark_matches(&variant.matcher, value, &mut hits);
+        } else {
+            let mut current = value.to_string();
+            let mut next = String::new();
+            for transform in &variant.transforms {
+                let result = transform.apply(&current);
+                next.clear();
+                next.push_str(&result);
+                std::mem::swap(&mut current, &mut next);
+            }
+            mark_matches(&variant.matcher, &current, &mut hits);
         }
     });
     hits
+}
+
+fn mark_matches(matcher: &aho_corasick::AhoCorasick, value: &str, hits: &mut [bool]) {
+    for found in matcher.find_iter(value.as_bytes()) {
+        if let Some(slot) = hits.get_mut(found.pattern().as_usize()) {
+            *slot = true;
+        }
+    }
+}
+
+fn prefilter_hits(prefilter: &Prefilter, context: &RequestContext) -> Vec<Vec<bool>> {
+    prefilter
+        .variants
+        .iter()
+        .map(|variant| scan_variant(variant, context))
+        .collect()
 }
 
 pub fn evaluate_phase(state: &mut EvaluationState, rules: &CompiledRules, phase: Phase) {
@@ -586,6 +618,60 @@ SecRule REQUEST_METHOD "@eq GET" "id:9003,phase:1,pass"
         assert!(matches!(
             evaluation.decision,
             Decision::Block { rule_id: 9005, .. }
+        ));
+    }
+
+    #[test]
+    fn regex_prefilter_uses_required_literal() {
+        let rules = load(r#"SecRule ARGS "@rx needle-[0-9]+" "id:9101,phase:1,deny""#);
+        let blocked = eval(&rules, "GET", "/?q=needle-42", &[], b"");
+        assert!(matches!(
+            blocked.decision,
+            Decision::Block { rule_id: 9101, .. }
+        ));
+        let passed = eval(&rules, "GET", "/?q=hello", &[], b"");
+        assert_eq!(passed.decision, Decision::Pass);
+    }
+
+    #[test]
+    fn regex_suffix_literals_are_used() {
+        let rules = load(r#"SecRule ARGS "@rx [0-9]+suffix" "id:9102,phase:1,deny""#);
+        let blocked = eval(&rules, "GET", "/?q=42suffix", &[], b"");
+        assert!(matches!(
+            blocked.decision,
+            Decision::Block { rule_id: 9102, .. }
+        ));
+    }
+
+    #[test]
+    fn case_insensitive_regex_is_not_prefiltered() {
+        let rules = load(r#"SecRule ARGS "@rx (?i)secret" "id:9103,phase:1,deny""#);
+        let blocked = eval(&rules, "GET", "/?q=SECRET", &[], b"");
+        assert!(matches!(
+            blocked.decision,
+            Decision::Block { rule_id: 9103, .. }
+        ));
+    }
+
+    #[test]
+    fn lowercase_transform_is_used_in_prefilter() {
+        let rules = load(r#"SecRule ARGS "@rx needle-[0-9]+" "id:9104,phase:1,deny,t:lowercase""#);
+        let blocked = eval(&rules, "GET", "/?q=NEEDLE-42", &[], b"");
+        assert!(matches!(
+            blocked.decision,
+            Decision::Block { rule_id: 9104, .. }
+        ));
+    }
+
+    #[test]
+    fn url_decode_transform_is_used_in_prefilter() {
+        let rules = load(
+            r#"SecRule REQUEST_URI "@rx needle-[0-9]+" "id:9105,phase:1,deny,t:urlDecodeUni,t:lowercase""#,
+        );
+        let blocked = eval(&rules, "GET", "/?q=NEEDLE%2D42", &[], b"");
+        assert!(matches!(
+            blocked.decision,
+            Decision::Block { rule_id: 9105, .. }
         ));
     }
 

@@ -16,6 +16,7 @@ dependencies = [
  "ipnet",
  "proptest",
  "regex",
+ "regex-syntax",
  "serde",
  "serde_json",
  "tempfile",

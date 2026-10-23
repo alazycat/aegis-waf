@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use base64::Engine as _;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Transform {
     Lowercase,
     UrlDecode,

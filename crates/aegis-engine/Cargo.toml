@@ -11,6 +11,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 http.workspace = true
 regex.workspace = true
+regex-syntax.workspace = true
 aho-corasick.workspace = true
 ipnet.workspace = true
 form_urlencoded.workspace = true

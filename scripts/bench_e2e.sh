@@ -44,6 +44,20 @@ make_rules 200 "$BENCH_DIR/rules200.conf" false
 make_rules 500 "$BENCH_DIR/rules500.conf" false
 make_rules 500 "$BENCH_DIR/rules500_block.conf" true
 
+make_regex_rules() {
+    local count=$1
+    local output=$2
+    : > "$output"
+    local index
+    for index in $(seq 0 $((count - 1))); do
+        printf 'SecRule ARGS "@rx rxneedle-%04d" "id:%d,phase:2,pass,t:lowercase"\n' \
+            "$index" "$((30000 + index))" >> "$output"
+    done
+}
+
+make_regex_rules 200 "$BENCH_DIR/rules200_regex.conf"
+make_regex_rules 500 "$BENCH_DIR/rules500_regex.conf"
+
 write_config() {
     local output=$1
     shift
@@ -87,6 +101,8 @@ write_config "$BENCH_DIR/empty.yaml" "$ROOT_FOR_CONFIG/target/bench/empty.conf"
 write_config "$BENCH_DIR/rules200.yaml" "$ROOT_FOR_CONFIG/target/bench/rules200.conf"
 write_config "$BENCH_DIR/rules500.yaml" "$ROOT_FOR_CONFIG/target/bench/rules500.conf"
 write_config "$BENCH_DIR/rules500_block.yaml" "$ROOT_FOR_CONFIG/target/bench/rules500_block.conf"
+write_config "$BENCH_DIR/rules200_regex.yaml" "$ROOT_FOR_CONFIG/target/bench/rules200_regex.conf"
+write_config "$BENCH_DIR/rules500_regex.yaml" "$ROOT_FOR_CONFIG/target/bench/rules500_regex.conf"
 
 cargo build --release -p aegis-proxy --bin aegis-proxy --examples
 
@@ -176,6 +192,19 @@ for count in 200 500; do
         echo "--- $count rules, no hit ---" | tee -a "$LOG"
         run_load safe "/search?q=hello" "$concurrency"
         echo "--- $count rules, one hit ---" | tee -a "$LOG"
+        run_load safe "/search?q=$needle" "$concurrency"
+    done
+    stop_proxy
+done
+
+for count in 200 500; do
+    echo "### $count regex + lowercase rules" | tee -a "$LOG"
+    start_proxy "$BENCH_DIR/rules${count}_regex.yaml" "$BENCH_DIR/proxy_rules${count}_regex.log"
+    needle=$(printf 'rxneedle-%04d' $((count - 1)))
+    for concurrency in $LARGE_CONCURRENCIES; do
+        echo "--- $count regex rules, no hit ---" | tee -a "$LOG"
+        run_load safe "/search?q=hello" "$concurrency"
+        echo "--- $count regex rules, one hit ---" | tee -a "$LOG"
         run_load safe "/search?q=$needle" "$concurrency"
     done
     stop_proxy

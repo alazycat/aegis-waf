@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aho_corasick::AhoCorasick;
+use regex_syntax::hir::literal::{ExtractKind, Extractor};
 
 use crate::error::LoadError;
 use crate::model::*;
@@ -323,7 +324,7 @@ fn compile_rule(
             chain: parsed.chain,
         },
         unconditional: false,
-        prefilter_patterns: Vec::new(),
+        prefilter: None,
         file: file.to_path_buf(),
         line: ast.line,
     }))
@@ -378,7 +379,7 @@ fn compile_action(
             chain: false,
         },
         unconditional: true,
-        prefilter_patterns: Vec::new(),
+        prefilter: None,
         file: file.to_path_buf(),
         line: ast.line,
     }))
@@ -448,8 +449,11 @@ fn variable_prefilter_scope(variable: &Variable) -> Option<PrefilterScope> {
     }
 }
 
+const MAX_PREFILTER_VARIANTS: usize = 16;
+const MAX_REGEX_LITERALS: usize = 32;
+
 fn prefilter_needles(rule: &CompiledRule) -> Option<(Vec<String>, PrefilterScope)> {
-    if rule.unconditional || rule.operator_negated || !rule.transformations.is_empty() {
+    if rule.unconditional || rule.operator_negated {
         return None;
     }
     let mut scope = PrefilterScope::default();
@@ -478,50 +482,115 @@ fn prefilter_needles(rule: &CompiledRule) -> Option<(Vec<String>, PrefilterScope
             }
             phrases
         }
+        CompiledOperator::Rx(regex) => regex_needles(regex)?,
         _ => return None,
     };
-    Some((needles, scope))
+    if needles.is_empty() {
+        None
+    } else {
+        Some((needles, scope))
+    }
+}
+
+fn regex_needles(regex: &regex::Regex) -> Option<Vec<String>> {
+    let pattern = regex.as_str();
+    // Unicode case folding cannot be represented soundly by a case-sensitive
+    // Aho-Corasick prefilter, so such patterns are always evaluated.
+    if pattern.contains("(?i") {
+        return None;
+    }
+    let hir = regex_syntax::parse(pattern).ok()?;
+    let prefix = Extractor::new().extract(&hir);
+    let seq = match prefix.literals() {
+        Some(literals) if !literals.is_empty() => prefix,
+        _ => Extractor::new().kind(ExtractKind::Suffix).extract(&hir),
+    };
+    let literals = seq.literals()?;
+    if literals.is_empty() || literals.len() > MAX_REGEX_LITERALS {
+        return None;
+    }
+    let mut needles = Vec::with_capacity(literals.len());
+    for literal in literals {
+        let bytes = literal.as_bytes();
+        if bytes.is_empty() {
+            return None;
+        }
+        needles.push(std::str::from_utf8(bytes).ok()?.to_string());
+    }
+    Some(needles)
+}
+
+struct VariantBuilder {
+    transforms: Vec<Transform>,
+    pattern_ids: HashMap<String, usize>,
+    patterns: Vec<String>,
+    scope: PrefilterScope,
 }
 
 fn build_prefilter(
     phase1: &mut [RuleGroup],
     phase2: &mut [RuleGroup],
 ) -> Result<Option<Prefilter>, LoadError> {
-    let mut pattern_ids: HashMap<String, usize> = HashMap::new();
-    let mut patterns: Vec<String> = Vec::new();
-    let mut scope = PrefilterScope::default();
+    let mut builders: Vec<VariantBuilder> = Vec::new();
+    let mut variant_ids: HashMap<Vec<Transform>, usize> = HashMap::new();
 
     for group in phase1.iter_mut().chain(phase2.iter_mut()) {
         let first = first_rule_mut(group);
         let Some((needles, group_scope)) = prefilter_needles(first) else {
             continue;
         };
-        scope = scope.merge(group_scope);
+        let transforms = first.transformations.clone();
+        let variant_index = if let Some(index) = variant_ids.get(&transforms) {
+            *index
+        } else {
+            if builders.len() >= MAX_PREFILTER_VARIANTS {
+                continue;
+            }
+            let index = builders.len();
+            variant_ids.insert(transforms.clone(), index);
+            builders.push(VariantBuilder {
+                transforms,
+                pattern_ids: HashMap::new(),
+                patterns: Vec::new(),
+                scope: PrefilterScope::default(),
+            });
+            index
+        };
+        let builder = &mut builders[variant_index];
+        builder.scope = builder.scope.merge(group_scope);
         let mut ids = Vec::with_capacity(needles.len());
         for needle in needles {
-            let id = if let Some(id) = pattern_ids.get(&needle) {
+            let id = if let Some(id) = builder.pattern_ids.get(&needle) {
                 *id
             } else {
-                let id = patterns.len();
-                pattern_ids.insert(needle.clone(), id);
-                patterns.push(needle);
+                let id = builder.patterns.len();
+                builder.pattern_ids.insert(needle.clone(), id);
+                builder.patterns.push(needle);
                 id
             };
             ids.push(id);
         }
-        first.prefilter_patterns = ids;
+        first.prefilter = Some(RulePrefilter {
+            variant: variant_index,
+            patterns: ids,
+        });
     }
 
-    if patterns.is_empty() {
+    if builders.is_empty() {
         return Ok(None);
     }
-    let matcher = AhoCorasick::new(patterns.iter().map(String::as_str))
-        .map_err(|error| LoadError::Prefilter(error.to_string()))?;
-    Ok(Some(Prefilter {
-        matcher: Arc::new(matcher),
-        pattern_count: patterns.len(),
-        scope,
-    }))
+    let mut variants = Vec::with_capacity(builders.len());
+    for builder in builders {
+        let matcher = AhoCorasick::new(builder.patterns.iter().map(String::as_str))
+            .map_err(|error| LoadError::Prefilter(error.to_string()))?;
+        variants.push(PrefilterVariant {
+            matcher: Arc::new(matcher),
+            pattern_count: builder.patterns.len(),
+            scope: builder.scope,
+            transforms: builder.transforms,
+        });
+    }
+    Ok(Some(Prefilter { variants }))
 }
 
 fn parse_variables(
