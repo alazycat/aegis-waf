@@ -17,70 +17,76 @@ UP_PORT=${UP_PORT:-13020}
 PROXY_PORT=${PROXY_PORT:-18090}
 ADMIN_PORT=${ADMIN_PORT:-19010}
 CONCURRENCIES=${CONCURRENCIES:-"1 8 32 64 128"}
+LARGE_CONCURRENCIES=${LARGE_CONCURRENCIES:-"32 64"}
 DURATION=${DURATION:-5}
 WARMUP=${WARMUP:-1}
 
 mkdir -p "$BENCH_DIR"
 : > "$BENCH_DIR/empty.conf"
 
-cat > "$BENCH_DIR/example.yaml" <<EOF
-listen: "127.0.0.1:$PROXY_PORT"
-upstream:
-  url: "http://127.0.0.1:$UP_PORT"
-  host_header: preserve
-  connect_timeout_ms: 3000
-  total_timeout_ms: 30000
-admin:
-  listen: "127.0.0.1:$ADMIN_PORT"
-  token: null
-rules:
-  files:
-    - "$ROOT_FOR_CONFIG/rules/examples/whitelist.conf"
-    - "$ROOT_FOR_CONFIG/rules/examples/base.conf"
-  lenient: false
-limits:
-  max_header_bytes: 65536
-  max_uri_bytes: 8192
-  max_body_bytes: 1048576
-  header_read_timeout_ms: 10000
-  body_read_timeout_ms: 15000
-on_error: block
-audit:
-  sink: none
-  mode: blocked_only
-  queue_capacity: 8192
-  include_query: false
-  matched_rules_limit: 16
-EOF
+make_rules() {
+    local count=$1
+    local output=$2
+    local block_last=$3
+    : > "$output"
+    local index action
+    for index in $(seq 0 $((count - 1))); do
+        action="pass"
+        if [ "$block_last" = "true" ] && [ "$index" -eq $((count - 1)) ]; then
+            action="deny,status:403"
+        fi
+        printf 'SecRule ARGS "@contains needle-%04d" "id:%d,phase:2,%s"\n' \
+            "$index" "$((20000 + index))" "$action" >> "$output"
+    done
+}
 
-cat > "$BENCH_DIR/empty.yaml" <<EOF
-listen: "127.0.0.1:$PROXY_PORT"
-upstream:
-  url: "http://127.0.0.1:$UP_PORT"
-  host_header: preserve
-  connect_timeout_ms: 3000
-  total_timeout_ms: 30000
-admin:
-  listen: "127.0.0.1:$ADMIN_PORT"
-  token: null
-rules:
-  files:
-    - "$ROOT_FOR_CONFIG/target/bench/empty.conf"
-  lenient: false
-limits:
-  max_header_bytes: 65536
-  max_uri_bytes: 8192
-  max_body_bytes: 1048576
-  header_read_timeout_ms: 10000
-  body_read_timeout_ms: 15000
-on_error: block
-audit:
-  sink: none
-  mode: blocked_only
-  queue_capacity: 8192
-  include_query: false
-  matched_rules_limit: 16
-EOF
+make_rules 200 "$BENCH_DIR/rules200.conf" false
+make_rules 500 "$BENCH_DIR/rules500.conf" false
+make_rules 500 "$BENCH_DIR/rules500_block.conf" true
+
+write_config() {
+    local output=$1
+    shift
+    {
+        echo "listen: \"127.0.0.1:$PROXY_PORT\""
+        echo "upstream:"
+        echo "  url: \"http://127.0.0.1:$UP_PORT\""
+        echo "  host_header: preserve"
+        echo "  connect_timeout_ms: 3000"
+        echo "  total_timeout_ms: 30000"
+        echo "admin:"
+        echo "  listen: \"127.0.0.1:$ADMIN_PORT\""
+        echo "  token: null"
+        echo "rules:"
+        echo "  files:"
+        local file
+        for file in "$@"; do
+            echo "    - \"$file\""
+        done
+        echo "  lenient: false"
+        echo "limits:"
+        echo "  max_header_bytes: 65536"
+        echo "  max_uri_bytes: 8192"
+        echo "  max_body_bytes: 1048576"
+        echo "  header_read_timeout_ms: 10000"
+        echo "  body_read_timeout_ms: 15000"
+        echo "on_error: block"
+        echo "audit:"
+        echo "  sink: none"
+        echo "  mode: blocked_only"
+        echo "  queue_capacity: 8192"
+        echo "  include_query: false"
+        echo "  matched_rules_limit: 16"
+    } > "$output"
+}
+
+write_config "$BENCH_DIR/example.yaml" \
+    "$ROOT_FOR_CONFIG/rules/examples/whitelist.conf" \
+    "$ROOT_FOR_CONFIG/rules/examples/base.conf"
+write_config "$BENCH_DIR/empty.yaml" "$ROOT_FOR_CONFIG/target/bench/empty.conf"
+write_config "$BENCH_DIR/rules200.yaml" "$ROOT_FOR_CONFIG/target/bench/rules200.conf"
+write_config "$BENCH_DIR/rules500.yaml" "$ROOT_FOR_CONFIG/target/bench/rules500.conf"
+write_config "$BENCH_DIR/rules500_block.yaml" "$ROOT_FOR_CONFIG/target/bench/rules500_block.conf"
 
 cargo build --release -p aegis-proxy --bin aegis-proxy --examples
 
@@ -125,6 +131,19 @@ stop_proxy() {
     fi
 }
 
+run_load() {
+    local mode=$1
+    local path=$2
+    local concurrency=$3
+    "$ROOT/target/release/examples/loadtest$EXE_SUFFIX" \
+        --addr "127.0.0.1:$PROXY_PORT" \
+        --mode "$mode" \
+        --path "$path" \
+        --concurrency "$concurrency" \
+        --duration "$DURATION" \
+        --warmup "$WARMUP" | tee -a "$LOG"
+}
+
 LOG="$BENCH_DIR/e2e.txt"
 : > "$LOG"
 
@@ -132,12 +151,12 @@ echo "### example rules (8 rules)" | tee -a "$LOG"
 start_proxy "$BENCH_DIR/example.yaml" "$BENCH_DIR/proxy_example.log"
 for mode in block safe; do
     for concurrency in $CONCURRENCIES; do
-        "$ROOT/target/release/examples/loadtest$EXE_SUFFIX" \
-            --addr "127.0.0.1:$PROXY_PORT" \
-            --mode "$mode" \
-            --concurrency "$concurrency" \
-            --duration "$DURATION" \
-            --warmup "$WARMUP" | tee -a "$LOG"
+        if [ "$mode" = "block" ]; then
+            path="/search?q=%3Cscript%3E"
+        else
+            path="/search?q=hello"
+        fi
+        run_load "$mode" "$path" "$concurrency"
     done
 done
 stop_proxy
@@ -145,12 +164,27 @@ stop_proxy
 echo "### empty rules (baseline)" | tee -a "$LOG"
 start_proxy "$BENCH_DIR/empty.yaml" "$BENCH_DIR/proxy_empty.log"
 for concurrency in $CONCURRENCIES; do
-    "$ROOT/target/release/examples/loadtest$EXE_SUFFIX" \
-        --addr "127.0.0.1:$PROXY_PORT" \
-        --mode safe \
-        --concurrency "$concurrency" \
-        --duration "$DURATION" \
-        --warmup "$WARMUP" | tee -a "$LOG"
+    run_load safe "/search?q=hello" "$concurrency"
+done
+stop_proxy
+
+for count in 200 500; do
+    echo "### $count rules" | tee -a "$LOG"
+    start_proxy "$BENCH_DIR/rules$count.yaml" "$BENCH_DIR/proxy_rules$count.log"
+    needle=$(printf 'needle-%04d' $((count - 1)))
+    for concurrency in $LARGE_CONCURRENCIES; do
+        echo "--- $count rules, no hit ---" | tee -a "$LOG"
+        run_load safe "/search?q=hello" "$concurrency"
+        echo "--- $count rules, one hit ---" | tee -a "$LOG"
+        run_load safe "/search?q=$needle" "$concurrency"
+    done
+    stop_proxy
+done
+
+echo "### 500 rules, matching deny" | tee -a "$LOG"
+start_proxy "$BENCH_DIR/rules500_block.yaml" "$BENCH_DIR/proxy_rules500_block.log"
+for concurrency in $LARGE_CONCURRENCIES; do
+    run_load block "/search?q=needle-0499" "$concurrency"
 done
 stop_proxy
 

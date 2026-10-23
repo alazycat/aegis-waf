@@ -47,6 +47,8 @@ pub enum LoadError {
     IncludeDepth(PathBuf),
     #[error("Include cycle detected at {0}")]
     IncludeCycle(PathBuf),
+    #[error("failed to build rule prefilter: {0}")]
+    Prefilter(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

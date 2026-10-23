@@ -6,6 +6,7 @@ version = 3
 name = "aegis-engine"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "base64",
  "criterion",
  "form_urlencoded",

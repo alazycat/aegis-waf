@@ -1,5 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use aho_corasick::AhoCorasick;
 
 use crate::error::LoadError;
 use crate::model::*;
@@ -245,12 +248,15 @@ fn compile_directives(
         ));
     }
 
+    let prefilter = build_prefilter(&mut phase1, &mut phase2)?;
+
     Ok(CompiledRules {
         version: options.version,
         rule_count,
         files,
         phase1,
         phase2,
+        prefilter,
     })
 }
 
@@ -317,6 +323,7 @@ fn compile_rule(
             chain: parsed.chain,
         },
         unconditional: false,
+        prefilter_patterns: Vec::new(),
         file: file.to_path_buf(),
         line: ast.line,
     }))
@@ -371,6 +378,7 @@ fn compile_action(
             chain: false,
         },
         unconditional: true,
+        prefilter_patterns: Vec::new(),
         file: file.to_path_buf(),
         line: ast.line,
     }))
@@ -393,6 +401,127 @@ fn resolve_disruptive(parsed: &ParsedActions, defaults: &DefaultActions) -> Opti
         Disruptive::Deny { .. } => Disruptive::Deny { status },
         Disruptive::Allow => Disruptive::Allow,
     })
+}
+
+fn first_rule_mut(group: &mut RuleGroup) -> &mut CompiledRule {
+    match group {
+        RuleGroup::Single(rule) => rule,
+        RuleGroup::Chain(rules) => &mut rules[0],
+    }
+}
+
+fn variable_prefilter_scope(variable: &Variable) -> Option<PrefilterScope> {
+    match variable {
+        Variable::RequestUri
+        | Variable::RequestMethod
+        | Variable::QueryString
+        | Variable::RequestFilename => Some(PrefilterScope {
+            request_line: true,
+            ..Default::default()
+        }),
+        Variable::RequestHeaders(_) => Some(PrefilterScope {
+            headers: true,
+            ..Default::default()
+        }),
+        Variable::Args | Variable::ArgsNames => Some(PrefilterScope {
+            query: true,
+            body: true,
+            ..Default::default()
+        }),
+        Variable::ArgsGet => Some(PrefilterScope {
+            query: true,
+            ..Default::default()
+        }),
+        Variable::ArgsPost => Some(PrefilterScope {
+            body: true,
+            ..Default::default()
+        }),
+        Variable::RequestCookies(_) => Some(PrefilterScope {
+            cookies: true,
+            ..Default::default()
+        }),
+        Variable::RequestBody => Some(PrefilterScope {
+            body: true,
+            ..Default::default()
+        }),
+        Variable::RemoteAddr | Variable::Tx(_) => None,
+    }
+}
+
+fn prefilter_needles(rule: &CompiledRule) -> Option<(Vec<String>, PrefilterScope)> {
+    if rule.unconditional || rule.operator_negated || !rule.transformations.is_empty() {
+        return None;
+    }
+    let mut scope = PrefilterScope::default();
+    for spec in &rule.variables {
+        let spec_scope = variable_prefilter_scope(&spec.variable)?;
+        scope = scope.merge(spec_scope);
+    }
+    let needles = match &rule.operator {
+        CompiledOperator::Contains(value)
+        | CompiledOperator::Eq(value)
+        | CompiledOperator::BeginsWith(value)
+        | CompiledOperator::EndsWith(value) => {
+            if value.is_empty() {
+                return None;
+            }
+            vec![value.clone()]
+        }
+        CompiledOperator::Pm(phrases) => {
+            let phrases: Vec<String> = phrases
+                .iter()
+                .filter(|phrase| !phrase.is_empty())
+                .cloned()
+                .collect();
+            if phrases.is_empty() {
+                return None;
+            }
+            phrases
+        }
+        _ => return None,
+    };
+    Some((needles, scope))
+}
+
+fn build_prefilter(
+    phase1: &mut [RuleGroup],
+    phase2: &mut [RuleGroup],
+) -> Result<Option<Prefilter>, LoadError> {
+    let mut pattern_ids: HashMap<String, usize> = HashMap::new();
+    let mut patterns: Vec<String> = Vec::new();
+    let mut scope = PrefilterScope::default();
+
+    for group in phase1.iter_mut().chain(phase2.iter_mut()) {
+        let first = first_rule_mut(group);
+        let Some((needles, group_scope)) = prefilter_needles(first) else {
+            continue;
+        };
+        scope = scope.merge(group_scope);
+        let mut ids = Vec::with_capacity(needles.len());
+        for needle in needles {
+            let id = if let Some(id) = pattern_ids.get(&needle) {
+                *id
+            } else {
+                let id = patterns.len();
+                pattern_ids.insert(needle.clone(), id);
+                patterns.push(needle);
+                id
+            };
+            ids.push(id);
+        }
+        first.prefilter_patterns = ids;
+    }
+
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+    let matcher = AhoCorasick::new(patterns.iter().map(String::as_str))
+        .map_err(|error| LoadError::Prefilter(error.to_string()))?;
+    Ok(Some(Prefilter {
+        matcher: Arc::new(matcher),
+        pattern_count: patterns.len(),
+        scope,
+    }))
 }
 
 fn parse_variables(

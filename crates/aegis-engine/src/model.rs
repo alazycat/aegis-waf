@@ -1,7 +1,36 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 pub use crate::operators::CompiledOperator;
 pub use crate::transforms::Transform;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PrefilterScope {
+    pub request_line: bool,
+    pub headers: bool,
+    pub query: bool,
+    pub body: bool,
+    pub cookies: bool,
+}
+
+impl PrefilterScope {
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            request_line: self.request_line || other.request_line,
+            headers: self.headers || other.headers,
+            query: self.query || other.query,
+            body: self.body || other.body,
+            cookies: self.cookies || other.cookies,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Prefilter {
+    pub matcher: Arc<aho_corasick::AhoCorasick>,
+    pub pattern_count: usize,
+    pub scope: PrefilterScope,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -9,7 +38,7 @@ pub enum Phase {
     Phase2,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Variable {
     RequestUri,
     RequestMethod,
@@ -74,6 +103,7 @@ pub struct CompiledRule {
     pub transformations: Vec<Transform>,
     pub actions: CompiledActions,
     pub unconditional: bool,
+    pub prefilter_patterns: Vec<usize>,
     pub file: PathBuf,
     pub line: usize,
 }
@@ -91,4 +121,5 @@ pub struct CompiledRules {
     pub files: Vec<PathBuf>,
     pub phase1: Vec<RuleGroup>,
     pub phase2: Vec<RuleGroup>,
+    pub prefilter: Option<Prefilter>,
 }

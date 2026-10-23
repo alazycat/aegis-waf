@@ -17,6 +17,7 @@ enum Mode {
 struct Options {
     addr: String,
     mode: Mode,
+    path: Option<String>,
     concurrency: usize,
     duration: Duration,
     warmup: Duration,
@@ -25,6 +26,7 @@ struct Options {
 fn parse_args() -> Result<Options, String> {
     let mut addr = "127.0.0.1:18080".to_string();
     let mut mode = Mode::Safe;
+    let mut path = None;
     let mut concurrency = 32usize;
     let mut duration = Duration::from_secs(5);
     let mut warmup = Duration::from_secs(1);
@@ -39,6 +41,7 @@ fn parse_args() -> Result<Options, String> {
                     other => return Err(format!("unknown mode {other}")),
                 };
             }
+            "--path" => path = Some(args.next().ok_or("--path requires a value")?),
             "--concurrency" => {
                 concurrency = args
                     .next()
@@ -64,7 +67,7 @@ fn parse_args() -> Result<Options, String> {
             }
             "--help" | "-h" => {
                 return Err(
-                    "usage: loadtest [--addr host:port] [--mode safe|block] [--concurrency N] [--duration S] [--warmup S]"
+                    "usage: loadtest [--addr host:port] [--mode safe|block] [--path /uri] [--concurrency N] [--duration S] [--warmup S]"
                         .to_string(),
                 );
             }
@@ -80,6 +83,7 @@ fn parse_args() -> Result<Options, String> {
     Ok(Options {
         addr,
         mode,
+        path,
         concurrency,
         duration,
         warmup,
@@ -176,17 +180,18 @@ fn percentile(sorted: &[u64], fraction: f64) -> f64 {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let options = parse_args().map_err(anyhow::Error::msg)?;
-    let path = match options.mode {
+    let path = options.path.as_deref().unwrap_or(match options.mode {
         Mode::Safe => "/search?q=hello",
         Mode::Block => "/search?q=%3Cscript%3E",
-    };
+    });
     let uri = format!("http://{}{}", options.addr, path);
     let start = Instant::now() + options.warmup;
     let deadline = start + options.duration;
 
     println!(
-        "mode={:?} concurrency={} duration={}s warmup={}s",
+        "mode={:?} path={} concurrency={} duration={}s warmup={}s",
         options.mode,
+        path,
         options.concurrency,
         options.duration.as_secs(),
         options.warmup.as_secs()

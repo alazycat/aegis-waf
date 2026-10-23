@@ -1,8 +1,11 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use http::HeaderMap;
 
-use crate::model::Variable;
+use crate::model::{PrefilterScope, Variable};
 
 use super::tx::TxStore;
 
@@ -28,8 +31,9 @@ pub struct RequestContext {
     body_pairs: Vec<(String, String)>,
     cookies: Vec<(String, String)>,
     remote_addr: IpAddr,
-    body: Vec<u8>,
+    body_text: String,
     tx: TxStore,
+    cache: RefCell<HashMap<Variable, Arc<Vec<String>>>>,
 }
 
 impl RequestContext {
@@ -68,13 +72,14 @@ impl RequestContext {
             body_pairs: Vec::new(),
             cookies,
             remote_addr: view.remote_addr,
-            body: Vec::new(),
+            body_text: String::new(),
             tx: TxStore::default(),
+            cache: RefCell::new(HashMap::new()),
         }
     }
 
     pub fn set_body(&mut self, body: &[u8]) {
-        self.body = body.to_vec();
+        self.body_text = String::from_utf8_lossy(body).into_owned();
         let is_form = self
             .headers
             .iter()
@@ -92,6 +97,7 @@ impl RequestContext {
         } else {
             Vec::new()
         };
+        self.cache.borrow_mut().clear();
     }
 
     pub fn tx(&self) -> &TxStore {
@@ -102,7 +108,23 @@ impl RequestContext {
         &mut self.tx
     }
 
-    pub fn extract(&self, variable: &Variable) -> Vec<String> {
+    pub fn extract(&self, variable: &Variable) -> Arc<Vec<String>> {
+        let cacheable = !matches!(variable, Variable::Tx(_));
+        if cacheable {
+            if let Some(values) = self.cache.borrow().get(variable) {
+                return values.clone();
+            }
+        }
+        let values = Arc::new(self.compute(variable));
+        if cacheable {
+            self.cache
+                .borrow_mut()
+                .insert(variable.clone(), values.clone());
+        }
+        values
+    }
+
+    fn compute(&self, variable: &Variable) -> Vec<String> {
         match variable {
             Variable::RequestUri => vec![self.uri.clone()],
             Variable::RequestMethod => vec![self.method.clone()],
@@ -154,7 +176,7 @@ impl RequestContext {
                 .filter(|(cookie, _)| cookie.eq_ignore_ascii_case(name))
                 .map(|(_, value)| value.clone())
                 .collect(),
-            Variable::RequestBody => vec![String::from_utf8_lossy(&self.body).into_owned()],
+            Variable::RequestBody => vec![self.body_text.clone()],
             Variable::RemoteAddr => vec![self.remote_addr.to_string()],
             Variable::Tx(None) => self.tx.values().map(str::to_string).collect(),
             Variable::Tx(Some(name)) => self
@@ -162,6 +184,42 @@ impl RequestContext {
                 .get(name)
                 .map(|value| vec![value.to_string()])
                 .unwrap_or_default(),
+        }
+    }
+
+    pub fn for_each_prefilter_value<F: FnMut(&str)>(&self, scope: PrefilterScope, mut f: F) {
+        if scope.request_line {
+            f(&self.method);
+            f(&self.uri);
+            f(&self.path);
+            if let Some(query) = &self.query {
+                f(query);
+            }
+        }
+        if scope.headers {
+            for (name, value) in &self.headers {
+                f(name);
+                f(value);
+            }
+        }
+        if scope.cookies {
+            for (name, value) in &self.cookies {
+                f(name);
+                f(value);
+            }
+        }
+        if scope.query {
+            for (name, value) in &self.query_pairs {
+                f(name);
+                f(value);
+            }
+        }
+        if scope.body {
+            f(&self.body_text);
+            for (name, value) in &self.body_pairs {
+                f(name);
+                f(value);
+            }
         }
     }
 }
@@ -208,13 +266,17 @@ mod tests {
         RequestContext::new(&view)
     }
 
+    fn extract(context: &RequestContext, variable: Variable) -> Vec<String> {
+        context.extract(&variable).iter().cloned().collect()
+    }
+
     #[test]
     fn extracts_query_arguments_and_names() {
         let headers = header_map(&[]);
         let context = context(&headers);
-        assert_eq!(context.extract(&Variable::ArgsGet), vec!["<script>", "2"]);
-        assert_eq!(context.extract(&Variable::Args), vec!["<script>", "2"]);
-        let mut names = context.extract(&Variable::ArgsNames);
+        assert_eq!(extract(&context, Variable::ArgsGet), vec!["<script>", "2"]);
+        assert_eq!(extract(&context, Variable::Args), vec!["<script>", "2"]);
+        let mut names = extract(&context, Variable::ArgsNames);
         names.sort();
         assert_eq!(names, vec!["page", "q"]);
     }
@@ -224,9 +286,9 @@ mod tests {
         let headers = header_map(&[("content-type", "application/x-www-form-urlencoded")]);
         let mut context = context(&headers);
         context.set_body(b"user=admin&token=a%20b");
-        assert_eq!(context.extract(&Variable::ArgsPost), vec!["admin", "a b"]);
+        assert_eq!(extract(&context, Variable::ArgsPost), vec!["admin", "a b"]);
         assert_eq!(
-            context.extract(&Variable::Args),
+            extract(&context, Variable::Args),
             vec!["<script>", "2", "admin", "a b"]
         );
     }
@@ -236,8 +298,8 @@ mod tests {
         let headers = header_map(&[("content-type", "multipart/form-data; boundary=x")]);
         let mut context = context(&headers);
         context.set_body(b"user=admin");
-        assert!(context.extract(&Variable::ArgsPost).is_empty());
-        assert_eq!(context.extract(&Variable::RequestBody), vec!["user=admin"]);
+        assert!(extract(&context, Variable::ArgsPost).is_empty());
+        assert_eq!(extract(&context, Variable::RequestBody), vec!["user=admin"]);
     }
 
     #[test]
@@ -245,10 +307,10 @@ mod tests {
         let headers = header_map(&[("X-Test", "one"), ("x-test", "two")]);
         let context = context(&headers);
         assert_eq!(
-            context.extract(&Variable::RequestHeaders(Some("X-TEST".into()))),
+            extract(&context, Variable::RequestHeaders(Some("X-TEST".into()))),
             vec!["one", "two"]
         );
-        let all = context.extract(&Variable::RequestHeaders(None));
+        let all = extract(&context, Variable::RequestHeaders(None));
         assert!(all.contains(&"one".to_string()));
         assert!(all.contains(&"two".to_string()));
     }
@@ -258,11 +320,11 @@ mod tests {
         let headers = header_map(&[("cookie", "session=abc; theme=dark")]);
         let context = context(&headers);
         assert_eq!(
-            context.extract(&Variable::RequestCookies(Some("session".into()))),
+            extract(&context, Variable::RequestCookies(Some("session".into()))),
             vec!["abc"]
         );
         assert_eq!(
-            context.extract(&Variable::RequestCookies(None)),
+            extract(&context, Variable::RequestCookies(None)),
             vec!["abc", "dark"]
         );
     }
@@ -271,23 +333,26 @@ mod tests {
     fn extracts_request_metadata_and_tx() {
         let headers = header_map(&[]);
         let mut context = context(&headers);
-        assert_eq!(context.extract(&Variable::RequestMethod), vec!["POST"]);
+        assert_eq!(extract(&context, Variable::RequestMethod), vec!["POST"]);
         assert_eq!(
-            context.extract(&Variable::RequestUri),
+            extract(&context, Variable::RequestUri),
             vec!["/search?q=%3Cscript%3E&page=2"]
         );
-        assert_eq!(context.extract(&Variable::RequestFilename), vec!["/search"]);
         assert_eq!(
-            context.extract(&Variable::QueryString),
+            extract(&context, Variable::RequestFilename),
+            vec!["/search"]
+        );
+        assert_eq!(
+            extract(&context, Variable::QueryString),
             vec!["q=%3Cscript%3E&page=2"]
         );
-        assert_eq!(context.extract(&Variable::RemoteAddr), vec!["203.0.113.7"]);
+        assert_eq!(extract(&context, Variable::RemoteAddr), vec!["203.0.113.7"]);
         context.tx_mut().set("score", "9".to_string());
         assert_eq!(
-            context.extract(&Variable::Tx(Some("SCORE".into()))),
+            extract(&context, Variable::Tx(Some("SCORE".into()))),
             vec!["9"]
         );
-        assert_eq!(context.extract(&Variable::Tx(None)), vec!["9"]);
+        assert_eq!(extract(&context, Variable::Tx(None)), vec!["9"]);
     }
 
     #[test]
@@ -295,6 +360,22 @@ mod tests {
         let headers = header_map(&[]);
         let mut context = context(&headers);
         context.set_body(&[0x66, 0x6f, 0x80, 0x6f]);
-        assert_eq!(context.extract(&Variable::RequestBody), vec!["fo\u{fffd}o"]);
+        assert_eq!(
+            extract(&context, Variable::RequestBody),
+            vec!["fo\u{fffd}o"]
+        );
+    }
+
+    #[test]
+    fn caches_non_tx_extractions_and_clears_on_body_change() {
+        let headers = header_map(&[]);
+        let mut context = context(&headers);
+        let first = context.extract(&Variable::ArgsGet);
+        let second = context.extract(&Variable::ArgsGet);
+        assert!(Arc::ptr_eq(&first, &second));
+
+        context.set_body(b"q=body");
+        let after = context.extract(&Variable::ArgsGet);
+        assert!(!Arc::ptr_eq(&first, &after));
     }
 }

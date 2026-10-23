@@ -1,9 +1,11 @@
-use std::borrow::Cow;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::error::EngineError;
-use crate::model::{CompiledRule, CompiledRules, Disruptive, Phase, RuleGroup, SetVar, SetVarOp};
+use crate::model::{
+    CompiledRule, CompiledRules, Disruptive, Phase, Prefilter, RuleGroup, SetVar, SetVarOp,
+};
 use crate::variables::request::{RequestContext, RequestView};
 use crate::variables::tx::expand_macros;
 
@@ -80,9 +82,24 @@ impl EvaluationState {
             Phase::Phase1 => &rules.phase1,
             Phase::Phase2 => &rules.phase2,
         };
+        let prefilter_hits = rules
+            .prefilter
+            .as_ref()
+            .map(|prefilter| prefilter_hits(prefilter, &self.context));
         for group in groups {
             if self.decision.is_decisive() {
                 break;
+            }
+            if let Some(hits) = &prefilter_hits {
+                let first = first_rule(group);
+                if !first.prefilter_patterns.is_empty()
+                    && !first
+                        .prefilter_patterns
+                        .iter()
+                        .any(|id| hits.get(*id).copied().unwrap_or(false))
+                {
+                    continue;
+                }
             }
             match group {
                 RuleGroup::Single(rule) => {
@@ -118,34 +135,47 @@ impl EvaluationState {
         if rule.unconditional {
             return true;
         }
-        let excluded: HashSet<String> = rule
+        let excluded_arcs: Vec<Arc<Vec<String>>> = rule
             .variables
             .iter()
             .filter(|spec| spec.negated)
-            .flat_map(|spec| self.context.extract(&spec.variable))
+            .map(|spec| self.context.extract(&spec.variable))
             .collect();
-        let values: Vec<String> = rule
-            .variables
+        let excluded: HashSet<&str> = excluded_arcs
             .iter()
-            .filter(|spec| !spec.negated)
-            .flat_map(|spec| self.context.extract(&spec.variable))
-            .filter(|value| !excluded.contains(value))
+            .flat_map(|values| values.iter().map(String::as_str))
             .collect();
-        if values.is_empty() {
-            return false;
+
+        for spec in rule.variables.iter().filter(|spec| !spec.negated) {
+            let values = self.context.extract(&spec.variable);
+            for value in values.iter() {
+                if excluded.contains(value.as_str()) {
+                    continue;
+                }
+                let matched = if rule.transformations.is_empty() {
+                    rule.operator.matches(value)
+                } else {
+                    let mut current = value.clone();
+                    let mut next = String::new();
+                    for transform in &rule.transformations {
+                        let result = transform.apply(&current);
+                        next.clear();
+                        next.push_str(&result);
+                        std::mem::swap(&mut current, &mut next);
+                    }
+                    rule.operator.matches(&current)
+                };
+                let matched = if rule.operator_negated {
+                    !matched
+                } else {
+                    matched
+                };
+                if matched {
+                    return true;
+                }
+            }
         }
-        values.iter().any(|value| {
-            let mut transformed = Cow::Borrowed(value.as_str());
-            for transform in &rule.transformations {
-                transformed = Cow::Owned(transform.apply(&transformed).into_owned());
-            }
-            let matched = rule.operator.matches(&transformed);
-            if rule.operator_negated {
-                !matched
-            } else {
-                matched
-            }
-        })
+        false
     }
 
     fn apply_actions(&mut self, rule: &CompiledRule) {
@@ -227,6 +257,23 @@ fn macro_integer(template: &str, context: &RequestContext) -> i64 {
         .trim()
         .parse::<i64>()
         .unwrap_or(0)
+}
+
+fn first_rule(group: &RuleGroup) -> &CompiledRule {
+    match group {
+        RuleGroup::Single(rule) => rule,
+        RuleGroup::Chain(rules) => &rules[0],
+    }
+}
+
+fn prefilter_hits(prefilter: &Prefilter, context: &RequestContext) -> Vec<bool> {
+    let mut hits = vec![false; prefilter.pattern_count];
+    context.for_each_prefilter_value(prefilter.scope, |value| {
+        for found in prefilter.matcher.find_iter(value.as_bytes()) {
+            hits[found.pattern().as_usize()] = true;
+        }
+    });
+    hits
 }
 
 pub fn evaluate_phase(state: &mut EvaluationState, rules: &CompiledRules, phase: Phase) {
@@ -491,6 +538,54 @@ SecRule TX:LEAK "@eq 1" "id:3,phase:1,deny,status:403"
         assert!(matches!(
             evaluation.decision,
             Decision::Block { rule_id: 3, .. }
+        ));
+    }
+
+    #[test]
+    fn prefilter_uses_decoded_query_values() {
+        let rules = load(r#"SecRule ARGS "@contains <script" "id:9001,phase:1,deny""#);
+        let evaluation = eval(&rules, "GET", "/?q=%3Cscript%3E", &[], b"");
+        assert!(matches!(
+            evaluation.decision,
+            Decision::Block { rule_id: 9001, .. }
+        ));
+    }
+
+    #[test]
+    fn prefilter_does_not_change_decisions() {
+        let rules = load(
+            r#"
+SecRule ARGS "@contains needle" "id:9002,phase:1,deny"
+SecRule REQUEST_METHOD "@eq GET" "id:9003,phase:1,pass"
+"#,
+        );
+        let passed = eval(&rules, "GET", "/?q=hello", &[], b"");
+        assert_eq!(passed.decision, Decision::Pass);
+        let blocked = eval(&rules, "GET", "/?q=needle", &[], b"");
+        assert!(matches!(
+            blocked.decision,
+            Decision::Block { rule_id: 9002, .. }
+        ));
+    }
+
+    #[test]
+    fn remote_addr_rules_are_not_prefiltered() {
+        let rules = load(r#"SecRule REMOTE_ADDR "@contains 127.0.0" "id:9004,phase:1,deny""#);
+        let evaluation = eval(&rules, "GET", "/", &[], b"");
+        assert!(matches!(
+            evaluation.decision,
+            Decision::Block { rule_id: 9004, .. }
+        ));
+    }
+
+    #[test]
+    fn pm_rules_are_prefiltered_from_headers() {
+        let rules =
+            load(r#"SecRule REQUEST_HEADERS:User-Agent "@pm sqlmap nikto" "id:9005,phase:1,deny""#);
+        let evaluation = eval(&rules, "GET", "/", &[("user-agent", "sqlmap/1.0")], b"");
+        assert!(matches!(
+            evaluation.decision,
+            Decision::Block { rule_id: 9005, .. }
         ));
     }
 
