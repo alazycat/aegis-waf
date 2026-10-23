@@ -172,6 +172,63 @@ SecRule REQUEST_URI "@contains /public" "id:1,pass"
 }
 
 #[test]
+fn sec_action_inherits_default_phase_and_deny() {
+    let rules = load(
+        r#"
+SecDefaultAction "phase:1,deny,status:451,log"
+SecAction "id:1,setvar:tx.x=1"
+"#,
+    )
+    .unwrap();
+    let RuleGroup::Single(rule) = &rules.phase1[0] else {
+        panic!("expected single rule");
+    };
+    assert!(rule.unconditional);
+    assert_eq!(rule.phase, Phase::Phase1);
+    assert!(matches!(
+        rule.actions.disruptive,
+        Some(aegis_engine::model::Disruptive::Deny { status: 451 })
+    ));
+    assert!(rule.actions.log);
+}
+
+#[test]
+fn block_uses_default_disruptive_action() {
+    let rules = load(
+        r#"
+SecDefaultAction "phase:2,pass"
+SecRule ARGS "@contains x" "id:1,phase:2,block"
+"#,
+    )
+    .unwrap();
+    let RuleGroup::Single(rule) = &rules.phase2[0] else {
+        panic!("expected single rule");
+    };
+    assert!(rule.actions.disruptive.is_none());
+}
+
+#[test]
+fn block_defaults_to_deny_without_default_action() {
+    let rules = load(r#"SecRule ARGS "@contains x" "id:1,phase:2,block""#).unwrap();
+    let RuleGroup::Single(rule) = &rules.phase2[0] else {
+        panic!("expected single rule");
+    };
+    assert!(matches!(
+        rule.actions.disruptive,
+        Some(aegis_engine::model::Disruptive::Deny { status: 403 })
+    ));
+}
+
+#[test]
+fn rejects_block_in_sec_default_action() {
+    let error = load(r#"SecDefaultAction "phase:1,block""#).unwrap_err();
+    assert!(
+        error.to_string().contains("SecDefaultAction"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn rejects_invalid_regex_with_location() {
     let error = load(r#"SecRule ARGS "@rx (" "id:1,deny""#).unwrap_err();
     let message = error.to_string();

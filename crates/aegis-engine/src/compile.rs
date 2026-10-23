@@ -26,6 +26,7 @@ impl Default for LoadOptions {
 struct DefaultActions {
     phase: Option<Phase>,
     disruptive: Option<Disruptive>,
+    disruptive_specified: bool,
     status: Option<u16>,
     log: Option<bool>,
     transforms: Vec<Transform>,
@@ -37,6 +38,7 @@ struct ParsedActions {
     phase: Option<Phase>,
     disruptive: Option<Disruptive>,
     disruptive_specified: bool,
+    block_requested: bool,
     status: Option<u16>,
     log: Option<bool>,
     msg: Option<String>,
@@ -53,6 +55,7 @@ impl ParsedActions {
         DefaultActions {
             phase: self.phase,
             disruptive: self.disruptive,
+            disruptive_specified: self.disruptive_specified,
             status: self.status,
             log: self.log,
             transforms: self.transforms,
@@ -153,7 +156,8 @@ fn compile_directives(
                         "SecAction cannot appear inside a chain".to_string(),
                     ));
                 }
-                let Some(rule) = compile_action(&file, &ast, options)? else {
+                let default = defaults.get(&file).cloned().unwrap_or_default();
+                let Some(rule) = compile_action(&file, &ast, &default, options)? else {
                     continue;
                 };
                 if !ids.insert(rule.id) {
@@ -190,6 +194,7 @@ fn compile_directives(
                     || !parsed.setvars.is_empty()
                     || parsed.logdata.is_some()
                     || parsed.chain
+                    || parsed.block_requested
                 {
                     return Err(compile_error(
                         &file,
@@ -289,16 +294,7 @@ fn compile_rule(
         Some(Phase::Phase2) => Phase::Phase2,
         None => Phase::Phase2,
     };
-    let disruptive = if parsed.disruptive_specified {
-        parsed.disruptive.clone()
-    } else {
-        defaults.disruptive.clone()
-    };
-    let status = parsed.status.or(defaults.status).unwrap_or(403);
-    let disruptive = disruptive.map(|action| match action {
-        Disruptive::Deny { .. } => Disruptive::Deny { status },
-        Disruptive::Allow => Disruptive::Allow,
-    });
+    let disruptive = resolve_disruptive(&parsed, defaults);
     let log = parsed.log.or(defaults.log).unwrap_or(false);
     let mut transformations = defaults.transforms.clone();
     transformations.extend(parsed.transforms);
@@ -329,6 +325,7 @@ fn compile_rule(
 fn compile_action(
     file: &Path,
     ast: &ActionAst,
+    defaults: &DefaultActions,
     options: &LoadOptions,
 ) -> Result<Option<CompiledRule>, LoadError> {
     let Some(parsed) = parse_actions(file, ast.line, ast.column, &ast.actions, options)? else {
@@ -354,12 +351,8 @@ fn compile_action(
             "SecAction cannot use chain".to_string(),
         ));
     }
-    let phase = parsed.phase.unwrap_or(Phase::Phase2);
-    let status = parsed.status.unwrap_or(403);
-    let disruptive = parsed.disruptive.map(|action| match action {
-        Disruptive::Deny { .. } => Disruptive::Deny { status },
-        Disruptive::Allow => Disruptive::Allow,
-    });
+    let phase = parsed.phase.or(defaults.phase).unwrap_or(Phase::Phase2);
+    let disruptive = resolve_disruptive(&parsed, defaults);
     Ok(Some(CompiledRule {
         id,
         phase,
@@ -369,7 +362,7 @@ fn compile_action(
         transformations: Vec::new(),
         actions: CompiledActions {
             disruptive,
-            log: parsed.log.unwrap_or(false),
+            log: parsed.log.or(defaults.log).unwrap_or(false),
             msg: parsed.msg,
             severity: parsed.severity,
             tags: parsed.tags,
@@ -381,6 +374,25 @@ fn compile_action(
         file: file.to_path_buf(),
         line: ast.line,
     }))
+}
+
+fn resolve_disruptive(parsed: &ParsedActions, defaults: &DefaultActions) -> Option<Disruptive> {
+    let action = if parsed.block_requested {
+        if defaults.disruptive_specified {
+            defaults.disruptive.clone()
+        } else {
+            Some(Disruptive::Deny { status: 403 })
+        }
+    } else if parsed.disruptive_specified {
+        parsed.disruptive.clone()
+    } else {
+        defaults.disruptive.clone()
+    };
+    let status = parsed.status.or(defaults.status).unwrap_or(403);
+    action.map(|action| match action {
+        Disruptive::Deny { .. } => Disruptive::Deny { status },
+        Disruptive::Allow => Disruptive::Allow,
+    })
 }
 
 fn parse_variables(
@@ -572,7 +584,7 @@ fn parse_actions(
                 };
                 parsed.phase = Some(phase);
             }
-            "deny" | "block" => {
+            "deny" => {
                 if value.is_some() {
                     return Err(compile_error(
                         file,
@@ -591,6 +603,26 @@ fn parse_actions(
                 }
                 parsed.disruptive_specified = true;
                 parsed.disruptive = Some(Disruptive::Deny { status: 403 });
+            }
+            "block" => {
+                if value.is_some() {
+                    return Err(compile_error(
+                        file,
+                        line,
+                        column,
+                        "block does not accept a value".to_string(),
+                    ));
+                }
+                if parsed.disruptive_specified {
+                    return Err(compile_error(
+                        file,
+                        line,
+                        column,
+                        "multiple disruptive actions".to_string(),
+                    ));
+                }
+                parsed.disruptive_specified = true;
+                parsed.block_requested = true;
             }
             "pass" => {
                 if value.is_some() {

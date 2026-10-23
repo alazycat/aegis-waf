@@ -116,7 +116,7 @@ Client ──HTTP/1.1──▶│ hyper Server                                  
 
 注释以 `#` 开始；支持反斜杠续行；支持单引号、双引号与反斜杠转义；引号内的逗号不作为动作分隔符。
 
-`SecDefaultAction` 的作用域为当前文件中该指令之后的所有规则；可继承的类别为 `phase`、`deny`/`pass`/`allow`、`status`、`log`/`nolog` 与 `t`。规则显式声明的同类动作覆盖默认值；默认的 `t:` 变换排在规则自身变换之前；不支持跨文件继承。
+`SecDefaultAction` 的作用域为当前文件中该指令之后的所有规则（包括 `SecAction`）；可继承的类别为 `phase`、具体破坏性动作（`deny`/`pass`/`allow`）、`status`、`log`/`nolog` 与 `t`。`block` 不能出现在 `SecDefaultAction` 中，它是规则侧“使用默认破坏性动作”的占位符。规则显式声明的同类动作覆盖默认值；显式 `pass` 可阻止继承默认 `deny`；默认的 `t:` 变换排在规则自身变换之前；不支持跨文件继承。
 
 ### 5.3 规则模型
 
@@ -159,7 +159,7 @@ pub struct CompiledRules {
   4. 规则命中后执行动作。
 - `chain`：
   - `chain` 动作把下一条规则串联进来，链上所有规则都命中才视为整体命中。
-  - 链中间规则的元数据动作（`setvar`、`msg` 等）在各自匹配时执行；破坏性动作只在链尾执行。
+  - 链中间规则的元数据动作（`setvar`、`msg` 等）在各自匹配时执行；破坏性动作只在链尾执行。链后续规则失败时，已执行的非破坏性动作不会回滚，这与 ModSecurity 的 `setvar` 语义一致。
   - 链中间规则声明破坏性动作视为编译错误。
 - 破坏性动作优先级：`deny`/`block` 立即产生 `Block` 决策并结束当前 phase 及后续 phase；`allow` 立即产生 `Allow` 决策，跳过后续所有 phase 的规则处理并直接放行；`pass` 不改变决策，继续执行后续规则。Phase 1 中产生 `Allow` 时，请求体不做检测、以流式转发，但仍受 `max_body_bytes` 约束。
 - 无任何规则命中时默认为 `Pass`。
@@ -231,7 +231,8 @@ pub struct CompiledRules {
 |---|---|
 | `id:n` | 规则 ID，必填且唯一 |
 | `phase:n` | 1 或 2，缺省 2 |
-| `deny` / `block` | 产生 Block 决策；`block` 作为 `deny` 的同义词 |
+| `deny` | 产生 Block 决策 |
+| `block` | 使用 `SecDefaultAction` 中的默认破坏性动作；未定义默认动作时等价于 `deny` 403 |
 | `pass` | 非破坏性，继续处理 |
 | `allow` | 产生 Allow 决策并结束规则处理 |
 | `status:n` | Block 时返回的状态码，默认 403 |

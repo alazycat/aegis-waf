@@ -479,6 +479,22 @@ SecRule ARGS "@contains x" "id:7002,phase:1,deny,status:402"
     }
 
     #[test]
+    fn failed_chain_keeps_non_disruptive_setvar() {
+        let rules = load(
+            r#"
+SecRule REQUEST_HEADERS:X-A "@eq 1" "id:1,phase:1,chain,setvar:tx.leak=1"
+SecRule REQUEST_HEADERS:X-B "@eq 1" "id:2,phase:1"
+SecRule TX:LEAK "@eq 1" "id:3,phase:1,deny,status:403"
+"#,
+        );
+        let evaluation = eval(&rules, "GET", "/", &[("x-a", "1")], b"");
+        assert!(matches!(
+            evaluation.decision,
+            Decision::Block { rule_id: 3, .. }
+        ));
+    }
+
+    #[test]
     fn log_flag_is_recorded() {
         let rules = load(r#"SecRule ARGS "@contains x" "id:8001,phase:1,pass,log""#);
         let evaluation = eval(&rules, "GET", "/?q=x", &[], b"");
