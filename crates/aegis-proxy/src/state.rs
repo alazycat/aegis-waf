@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -7,17 +8,19 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 
 use crate::config::Config;
+use crate::rules::RulesManager;
 
 pub type ProxyClient = Client<HttpConnector, Full<Bytes>>;
 
 pub struct AppState {
     pub config: Config,
     pub client: ProxyClient,
+    pub rules: Arc<RulesManager>,
     pub started_at: Instant,
 }
 
 impl AppState {
-    pub fn new(config: Config) -> anyhow::Result<Self> {
+    pub fn new(config: Config, rules: Arc<RulesManager>) -> anyhow::Result<Self> {
         let mut connector = HttpConnector::new();
         connector.set_connect_timeout(Some(Duration::from_millis(
             config.upstream.connect_timeout_ms,
@@ -27,6 +30,7 @@ impl AppState {
         Ok(Self {
             config,
             client,
+            rules,
             started_at: Instant::now(),
         })
     }

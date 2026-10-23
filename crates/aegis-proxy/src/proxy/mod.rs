@@ -14,6 +14,8 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpListener;
 use tracing::{debug, warn};
 
+use aegis_engine::{evaluate_phase, Decision, EvaluationState, Phase, RequestView};
+
 use crate::state::AppState;
 
 pub mod forward;
@@ -56,6 +58,10 @@ fn content_length(headers: &hyper::HeaderMap) -> Option<u64> {
         .and_then(|value| value.parse::<u64>().ok())
 }
 
+fn blocked_status(status: u16) -> StatusCode {
+    StatusCode::from_u16(status).unwrap_or(StatusCode::FORBIDDEN)
+}
+
 pub async fn serve_on(listener: TcpListener, state: Arc<AppState>) -> anyhow::Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -80,6 +86,7 @@ async fn handle(
     peer: SocketAddr,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let (parts, incoming) = request.into_parts();
+    let rules = state.rules.snapshot();
 
     let uri_len = parts
         .uri
@@ -95,6 +102,32 @@ async fn handle(
             "request headers too large\n",
         ));
     }
+
+    let uri_string = parts
+        .uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/")
+        .to_string();
+    let mut evaluation = {
+        let view = RequestView {
+            method: parts.method.as_str(),
+            uri: &uri_string,
+            path: parts.uri.path(),
+            query: parts.uri.query(),
+            headers: &parts.headers,
+            body: &[],
+            remote_addr: peer.ip(),
+        };
+        EvaluationState::new(&view)
+    };
+    evaluate_phase(&mut evaluation, &rules, Phase::Phase1);
+
+    let skip_phase_two = matches!(evaluation.decision(), Decision::Allow { .. });
+    if let Decision::Block { status, .. } = evaluation.decision() {
+        return Ok(text_response(blocked_status(*status), "request blocked\n"));
+    }
+
     if let Some(length) = content_length(&parts.headers) {
         if length > state.config.limits.max_body_bytes as u64 {
             return Ok(text_response(
@@ -132,6 +165,14 @@ async fn handle(
             ));
         }
     };
+
+    if !skip_phase_two {
+        evaluation.set_body(&body);
+        evaluate_phase(&mut evaluation, &rules, Phase::Phase2);
+        if let Decision::Block { status, .. } = evaluation.decision() {
+            return Ok(text_response(blocked_status(*status), "request blocked\n"));
+        }
+    }
 
     match forward::forward(&state, &parts, body, peer.ip()).await {
         Ok(response) => Ok(response),
