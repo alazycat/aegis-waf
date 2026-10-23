@@ -1,0 +1,32 @@
+listen: "0.0.0.0:8080"
+
+upstream:
+  url: "http://127.0.0.1:3000"
+  host_header: preserve
+  connect_timeout_ms: 3000
+  total_timeout_ms: 30000
+
+admin:
+  listen: "127.0.0.1:9001"
+  token: null
+
+rules:
+  files: ["rules/examples/*.conf"]
+  lenient: false
+
+limits:
+  max_header_bytes: 65536
+  max_uri_bytes: 8192
+  max_body_bytes: 1048576
+  header_read_timeout_ms: 10000
+  body_read_timeout_ms: 15000
+
+on_error: block
+
+audit:
+  sink: file
+  path: "logs/audit.jsonl"
+  mode: blocked_only
+  queue_capacity: 8192
+  include_query: false
+  matched_rules_limit: 16

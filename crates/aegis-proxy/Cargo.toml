@@ -1,0 +1,37 @@
+[package]
+name = "aegis-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "aegis_proxy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aegis-proxy"
+path = "src/main.rs"
+
+[dependencies]
+aegis-engine = { path = "../aegis-engine" }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+http.workspace = true
+tokio.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+arc-swap.workspace = true
+glob.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
