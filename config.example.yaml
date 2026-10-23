@@ -11,7 +11,9 @@ admin:
   token: null
 
 rules:
-  files: ["rules/examples/*.conf"]
+  files:
+    - "rules/examples/whitelist.conf"
+    - "rules/examples/base.conf"
   lenient: false
 
 limits:
