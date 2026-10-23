@@ -16,6 +16,7 @@ form_urlencoded.workspace = true
 html-escape.workspace = true
 base64.workspace = true
 glob.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
