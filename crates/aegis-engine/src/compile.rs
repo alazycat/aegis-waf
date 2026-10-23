@@ -81,6 +81,25 @@ fn compile_error(file: &Path, line: usize, column: usize, message: String) -> Lo
     }
 }
 
+fn raw_actions_has_chain(actions: &str) -> bool {
+    split_actions(actions)
+        .iter()
+        .any(|item| item.trim().eq_ignore_ascii_case("chain"))
+}
+
+fn discard_chain(
+    chain: &mut Vec<CompiledRule>,
+    chain_phase: &mut Option<Phase>,
+    ids: &mut HashSet<u32>,
+    rule_count: &mut usize,
+) {
+    for rule in chain.drain(..) {
+        ids.remove(&rule.id);
+        *rule_count = rule_count.saturating_sub(1);
+    }
+    *chain_phase = None;
+}
+
 fn compile_directives(
     directives: Vec<LocatedDirective>,
     files: Vec<PathBuf>,
@@ -92,6 +111,7 @@ fn compile_directives(
     let mut phase2 = Vec::new();
     let mut chain: Vec<CompiledRule> = Vec::new();
     let mut chain_phase: Option<Phase> = None;
+    let mut skipping_chain = false;
     let mut last_location: Option<(PathBuf, usize, usize)> = None;
     let mut rule_count = 0usize;
 
@@ -99,11 +119,26 @@ fn compile_directives(
         let file = located.file;
         match located.directive {
             Directive::Rule(ast) => {
+                let has_chain = raw_actions_has_chain(&ast.actions);
+                if skipping_chain {
+                    if !has_chain {
+                        skipping_chain = false;
+                    }
+                    continue;
+                }
                 let default = defaults.get(&file).cloned().unwrap_or_default();
-                let Some(rule) = compile_rule(&file, &ast, &default, options)? else {
+                let fallback_id = chain.first().map(|rule| rule.id);
+                let fallback_phase = chain.first().map(|rule| rule.phase);
+                let Some(rule) =
+                    compile_rule(&file, &ast, &default, fallback_id, fallback_phase, options)?
+                else {
+                    if !chain.is_empty() {
+                        discard_chain(&mut chain, &mut chain_phase, &mut ids, &mut rule_count);
+                    }
+                    skipping_chain = has_chain;
                     continue;
                 };
-                if !ids.insert(rule.id) {
+                if chain.is_empty() && !ids.insert(rule.id) {
                     return Err(compile_error(
                         &file,
                         ast.line,
@@ -114,7 +149,7 @@ fn compile_directives(
                 rule_count += 1;
                 last_location = Some((file.clone(), ast.line, ast.column));
 
-                if rule.actions.chain && rule.actions.disruptive.is_some() {
+                if !chain.is_empty() && rule.actions.chain && rule.actions.disruptive.is_some() {
                     return Err(compile_error(
                         &file,
                         ast.line,
@@ -152,6 +187,7 @@ fn compile_directives(
                 }
             }
             Directive::Action(ast) => {
+                skipping_chain = false;
                 if !chain.is_empty() {
                     return Err(compile_error(
                         &file,
@@ -179,6 +215,7 @@ fn compile_directives(
                 }
             }
             Directive::DefaultAction(ast) => {
+                skipping_chain = false;
                 if !chain.is_empty() {
                     return Err(compile_error(
                         &file,
@@ -210,8 +247,11 @@ fn compile_directives(
                 }
                 defaults.insert(file, parsed.into_default_actions());
             }
-            Directive::Marker(_) => {}
+            Directive::Marker(_) => {
+                skipping_chain = false;
+            }
             Directive::Unknown { name, line, column } => {
+                skipping_chain = false;
                 if options.lenient {
                     tracing::warn!(
                         file = %file.display(),
@@ -238,15 +278,19 @@ fn compile_directives(
         }
     }
 
-    if let Some(rule) = chain.first() {
-        let (file, line, column) =
-            last_location.unwrap_or_else(|| (rule.file.clone(), rule.line, 1));
-        return Err(compile_error(
-            &file,
-            line,
-            column,
-            "chain action on final rule (no following rule)".to_string(),
-        ));
+    if !chain.is_empty() || skipping_chain {
+        if options.lenient {
+            discard_chain(&mut chain, &mut chain_phase, &mut ids, &mut rule_count);
+        } else if let Some(rule) = chain.first() {
+            let (file, line, column) =
+                last_location.unwrap_or_else(|| (rule.file.clone(), rule.line, 1));
+            return Err(compile_error(
+                &file,
+                line,
+                column,
+                "chain action on final rule (no following rule)".to_string(),
+            ));
+        }
     }
 
     let prefilter = build_prefilter(&mut phase1, &mut phase2)?;
@@ -265,6 +309,8 @@ fn compile_rule(
     file: &Path,
     ast: &RuleAst,
     defaults: &DefaultActions,
+    fallback_id: Option<u32>,
+    fallback_phase: Option<Phase>,
     options: &LoadOptions,
 ) -> Result<Option<CompiledRule>, LoadError> {
     let Some(variables) = parse_variables(file, ast.line, ast.column, &ast.variables, options)?
@@ -284,7 +330,7 @@ fn compile_rule(
     let Some(parsed) = parse_actions(file, ast.line, ast.column, &ast.actions, options)? else {
         return Ok(None);
     };
-    let Some(id) = parsed.id else {
+    let Some(id) = parsed.id.or(fallback_id) else {
         if options.lenient {
             tracing::warn!(file = %file.display(), line = ast.line, "skipping rule without id");
             return Ok(None);
@@ -296,7 +342,7 @@ fn compile_rule(
             "rule id is required".to_string(),
         ));
     };
-    let phase = match parsed.phase.or(defaults.phase) {
+    let phase = match parsed.phase.or(fallback_phase).or(defaults.phase) {
         Some(Phase::Phase1) => Phase::Phase1,
         Some(Phase::Phase2) => Phase::Phase2,
         None => Phase::Phase2,
@@ -451,8 +497,15 @@ fn variable_prefilter_scope(variable: &Variable) -> Option<PrefilterScope> {
 
 const MAX_PREFILTER_VARIANTS: usize = 16;
 const MAX_REGEX_LITERALS: usize = 32;
+const MAX_REGEX_SET_PATTERNS: usize = 512;
+const MIN_REGEX_SET_PATTERNS: usize = 8;
 
-fn prefilter_needles(rule: &CompiledRule) -> Option<(Vec<String>, PrefilterScope)> {
+enum PrefilterSpec {
+    Ac(Vec<String>),
+    Regex(String),
+}
+
+fn prefilter_spec(rule: &CompiledRule) -> Option<(PrefilterSpec, PrefilterScope)> {
     if rule.unconditional || rule.operator_negated {
         return None;
     }
@@ -461,7 +514,7 @@ fn prefilter_needles(rule: &CompiledRule) -> Option<(Vec<String>, PrefilterScope
         let spec_scope = variable_prefilter_scope(&spec.variable)?;
         scope = scope.merge(spec_scope);
     }
-    let needles = match &rule.operator {
+    let spec = match &rule.operator {
         CompiledOperator::Contains(value)
         | CompiledOperator::Eq(value)
         | CompiledOperator::BeginsWith(value)
@@ -469,7 +522,7 @@ fn prefilter_needles(rule: &CompiledRule) -> Option<(Vec<String>, PrefilterScope
             if value.is_empty() {
                 return None;
             }
-            vec![value.clone()]
+            PrefilterSpec::Ac(vec![value.clone()])
         }
         CompiledOperator::Pm(phrases) => {
             let phrases: Vec<String> = phrases
@@ -480,22 +533,26 @@ fn prefilter_needles(rule: &CompiledRule) -> Option<(Vec<String>, PrefilterScope
             if phrases.is_empty() {
                 return None;
             }
-            phrases
+            PrefilterSpec::Ac(phrases)
         }
-        CompiledOperator::Rx(regex) => regex_needles(regex)?,
+        CompiledOperator::Rx(regex) => {
+            if let Some(needles) = regex_needles(regex) {
+                PrefilterSpec::Ac(needles)
+            } else if !regex.is_match("") {
+                PrefilterSpec::Regex(regex.as_str().to_string())
+            } else {
+                return None;
+            }
+        }
         _ => return None,
     };
-    if needles.is_empty() {
-        None
-    } else {
-        Some((needles, scope))
-    }
+    Some((spec, scope))
 }
 
 fn regex_needles(regex: &regex::Regex) -> Option<Vec<String>> {
     let pattern = regex.as_str();
     // Unicode case folding cannot be represented soundly by a case-sensitive
-    // Aho-Corasick prefilter, so such patterns are always evaluated.
+    // Aho-Corasick prefilter, so such patterns use the RegexSet fallback.
     if pattern.contains("(?i") {
         return None;
     }
@@ -522,8 +579,10 @@ fn regex_needles(regex: &regex::Regex) -> Option<Vec<String>> {
 
 struct VariantBuilder {
     transforms: Vec<Transform>,
-    pattern_ids: HashMap<String, usize>,
-    patterns: Vec<String>,
+    ac_pattern_ids: HashMap<String, usize>,
+    ac_patterns: Vec<String>,
+    regex_ids: HashMap<String, usize>,
+    regex_patterns: Vec<String>,
     scope: PrefilterScope,
 }
 
@@ -536,7 +595,7 @@ fn build_prefilter(
 
     for group in phase1.iter_mut().chain(phase2.iter_mut()) {
         let first = first_rule_mut(group);
-        let Some((needles, group_scope)) = prefilter_needles(first) else {
+        let Some((spec, group_scope)) = prefilter_spec(first) else {
             continue;
         };
         let transforms = first.transformations.clone();
@@ -550,42 +609,110 @@ fn build_prefilter(
             variant_ids.insert(transforms.clone(), index);
             builders.push(VariantBuilder {
                 transforms,
-                pattern_ids: HashMap::new(),
-                patterns: Vec::new(),
+                ac_pattern_ids: HashMap::new(),
+                ac_patterns: Vec::new(),
+                regex_ids: HashMap::new(),
+                regex_patterns: Vec::new(),
                 scope: PrefilterScope::default(),
             });
             index
         };
         let builder = &mut builders[variant_index];
         builder.scope = builder.scope.merge(group_scope);
-        let mut ids = Vec::with_capacity(needles.len());
-        for needle in needles {
-            let id = if let Some(id) = builder.pattern_ids.get(&needle) {
-                *id
-            } else {
-                let id = builder.patterns.len();
-                builder.pattern_ids.insert(needle.clone(), id);
-                builder.patterns.push(needle);
-                id
-            };
-            ids.push(id);
+
+        match spec {
+            PrefilterSpec::Ac(needles) => {
+                let mut ids = Vec::with_capacity(needles.len());
+                for needle in needles {
+                    let id = if let Some(id) = builder.ac_pattern_ids.get(&needle) {
+                        *id
+                    } else {
+                        let id = builder.ac_patterns.len();
+                        builder.ac_pattern_ids.insert(needle.clone(), id);
+                        builder.ac_patterns.push(needle);
+                        id
+                    };
+                    ids.push(id);
+                }
+                first.prefilter = Some(RulePrefilter {
+                    variant: variant_index,
+                    ac_patterns: ids,
+                    regex_pattern: None,
+                });
+            }
+            PrefilterSpec::Regex(pattern) => {
+                let id = if let Some(id) = builder.regex_ids.get(&pattern) {
+                    *id
+                } else {
+                    if builder.regex_patterns.len() >= MAX_REGEX_SET_PATTERNS {
+                        continue;
+                    }
+                    let id = builder.regex_patterns.len();
+                    builder.regex_ids.insert(pattern.clone(), id);
+                    builder.regex_patterns.push(pattern);
+                    id
+                };
+                first.prefilter = Some(RulePrefilter {
+                    variant: variant_index,
+                    ac_patterns: Vec::new(),
+                    regex_pattern: Some(id),
+                });
+            }
         }
-        first.prefilter = Some(RulePrefilter {
-            variant: variant_index,
-            patterns: ids,
-        });
     }
 
     if builders.is_empty() {
         return Ok(None);
     }
+
+    let build_regex_set: Vec<bool> = builders
+        .iter()
+        .map(|builder| builder.regex_patterns.len() >= MIN_REGEX_SET_PATTERNS)
+        .collect();
+    for group in phase1.iter_mut().chain(phase2.iter_mut()) {
+        let first = first_rule_mut(group);
+        let disable = first
+            .prefilter
+            .as_ref()
+            .map(|prefilter| {
+                prefilter.ac_patterns.is_empty()
+                    && prefilter.regex_pattern.is_some()
+                    && !build_regex_set[prefilter.variant]
+            })
+            .unwrap_or(false);
+        if disable {
+            first.prefilter = None;
+        }
+    }
+
     let mut variants = Vec::with_capacity(builders.len());
-    for builder in builders {
-        let matcher = AhoCorasick::new(builder.patterns.iter().map(String::as_str))
-            .map_err(|error| LoadError::Prefilter(error.to_string()))?;
+    for (builder, build_regex_set) in builders.into_iter().zip(build_regex_set) {
+        let matcher = if builder.ac_patterns.is_empty() {
+            None
+        } else {
+            Some(Arc::new(
+                AhoCorasick::new(builder.ac_patterns.iter().map(String::as_str))
+                    .map_err(|error| LoadError::Prefilter(error.to_string()))?,
+            ))
+        };
+        let regex_pattern_count = if build_regex_set {
+            builder.regex_patterns.len()
+        } else {
+            0
+        };
+        let regex_set = if build_regex_set {
+            Some(Arc::new(
+                regex::RegexSet::new(builder.regex_patterns.iter().map(String::as_str))
+                    .map_err(|error| LoadError::Prefilter(error.to_string()))?,
+            ))
+        } else {
+            None
+        };
         variants.push(PrefilterVariant {
-            matcher: Arc::new(matcher),
-            pattern_count: builder.patterns.len(),
+            matcher,
+            regex_set,
+            ac_pattern_count: builder.ac_patterns.len(),
+            regex_pattern_count,
             scope: builder.scope,
             transforms: builder.transforms,
         });

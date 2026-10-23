@@ -58,3 +58,11 @@ cargo test -p aegis-engine
 cargo test -p aegis-proxy
 cargo run -p aegis-proxy -- --config config.example.yaml --check
 ```
+
+CRS 子集预筛覆盖率：
+
+```bash
+bash scripts/bench_crs.sh
+```
+
+结果与分析见 `docs/benchmarks.md` 第 13 节。

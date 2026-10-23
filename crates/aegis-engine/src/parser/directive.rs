@@ -55,16 +55,16 @@ pub fn parse_directive(line: &LogicalLine) -> Result<Directive, ParseError> {
     match lower_name.as_str() {
         "secrule" => {
             let args = split_args(rest).map_err(|message| fail(1, message))?;
-            if args.len() != 3 {
+            if args.len() != 2 && args.len() != 3 {
                 return Err(fail(
                     args.first().map(|arg| arg.column).unwrap_or(1),
-                    format!("SecRule expects 3 arguments, got {}", args.len()),
+                    format!("SecRule expects 2 or 3 arguments, got {}", args.len()),
                 ));
             }
             Ok(Directive::Rule(RuleAst {
                 variables: args[0].value.clone(),
                 operator: args[1].value.clone(),
-                actions: args[2].value.clone(),
+                actions: args.get(2).map(|arg| arg.value.clone()).unwrap_or_default(),
                 line: line.line,
                 column: args[0].column,
             }))

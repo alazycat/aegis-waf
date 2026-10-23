@@ -11,7 +11,7 @@ Rust 编写的反向代理 Web 应用防火墙（WAF）v0.1。
 - 变换、正则/字符串/IP/数值算子、`chain`
 - TX 变量、`setvar` 与宏展开，可表达 CRS 风格异常评分
 - 规则热重载（管理 API 与 Unix `SIGHUP`）
-- 变量提取缓存与 Aho-Corasick 预筛（含 regex 字面量与变换感知）
+- 变量提取缓存与 Aho-Corasick/RegexSet 预筛（含 regex 字面量与变换感知）
 - JSON Lines 审计，有界队列，丢弃计数
 - 管理 API：`/healthz` `/readyz` `/status` `/rules` `/rules/reload`
 

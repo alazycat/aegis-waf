@@ -58,6 +58,19 @@ make_regex_rules() {
 make_regex_rules 200 "$BENCH_DIR/rules200_regex.conf"
 make_regex_rules 500 "$BENCH_DIR/rules500_regex.conf"
 
+make_ignorecase_rules() {
+    local count=$1
+    local output=$2
+    : > "$output"
+    local index
+    for index in $(seq 0 $((count - 1))); do
+        printf 'SecRule ARGS "@rx (?i)icase-%04d" "id:%d,phase:2,pass"\n' \
+            "$index" "$((40000 + index))" >> "$output"
+    done
+}
+
+make_ignorecase_rules 500 "$BENCH_DIR/rules500_ignorecase.conf"
+
 write_config() {
     local output=$1
     shift
@@ -103,6 +116,7 @@ write_config "$BENCH_DIR/rules500.yaml" "$ROOT_FOR_CONFIG/target/bench/rules500.
 write_config "$BENCH_DIR/rules500_block.yaml" "$ROOT_FOR_CONFIG/target/bench/rules500_block.conf"
 write_config "$BENCH_DIR/rules200_regex.yaml" "$ROOT_FOR_CONFIG/target/bench/rules200_regex.conf"
 write_config "$BENCH_DIR/rules500_regex.yaml" "$ROOT_FOR_CONFIG/target/bench/rules500_regex.conf"
+write_config "$BENCH_DIR/rules500_ignorecase.yaml" "$ROOT_FOR_CONFIG/target/bench/rules500_ignorecase.conf"
 
 cargo build --release -p aegis-proxy --bin aegis-proxy --examples
 
@@ -209,6 +223,16 @@ for count in 200 500; do
     done
     stop_proxy
 done
+
+echo "### 500 ignore-case regex rules" | tee -a "$LOG"
+start_proxy "$BENCH_DIR/rules500_ignorecase.yaml" "$BENCH_DIR/proxy_rules500_ignorecase.log"
+for concurrency in $LARGE_CONCURRENCIES; do
+    echo "--- 500 ignore-case regex rules, no hit ---" | tee -a "$LOG"
+    run_load safe "/search?q=hello" "$concurrency"
+    echo "--- 500 ignore-case regex rules, one hit ---" | tee -a "$LOG"
+    run_load safe "/search?q=ICASE-0499" "$concurrency"
+done
+stop_proxy
 
 echo "### 500 rules, matching deny" | tee -a "$LOG"
 start_proxy "$BENCH_DIR/rules500_block.yaml" "$BENCH_DIR/proxy_rules500_block.log"

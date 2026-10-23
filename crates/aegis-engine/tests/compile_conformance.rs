@@ -111,12 +111,50 @@ fn rejects_chain_on_last_rule() {
 fn rejects_disruptive_action_in_chain_middle() {
     let error = load(
         r#"
-SecRule ARGS "@rx a" "id:1,phase:1,chain,deny"
-SecRule ARGS "@rx b" "id:2,phase:1,deny"
+SecRule ARGS "@rx a" "id:1,phase:1,chain"
+SecRule ARGS "@rx b" "id:2,phase:1,chain,deny"
+SecRule ARGS "@rx c" "id:3,phase:1,deny"
 "#,
     )
     .unwrap_err();
     assert!(error.to_string().contains("chain"));
+}
+
+#[test]
+fn chain_links_can_omit_ids_and_phase() {
+    let rules = load(
+        r#"
+SecRule ARGS "@rx a" "id:1,phase:1,chain"
+SecRule ARGS "@rx b" ""
+"#,
+    )
+    .unwrap();
+    let RuleGroup::Chain(chain) = &rules.phase1[0] else {
+        panic!("expected chain");
+    };
+    assert_eq!(chain.len(), 2);
+    assert_eq!(chain[0].id, 1);
+    assert_eq!(chain[1].id, 1);
+    assert_eq!(chain[1].phase, Phase::Phase1);
+    assert_eq!(rules.rule_count, 2);
+}
+
+#[test]
+fn chain_starter_can_declare_block() {
+    let rules = load(
+        r#"
+SecRule REQUEST_HEADERS:X-A "@eq 1" "id:1,phase:1,chain,block"
+SecRule REQUEST_HEADERS:X-B "@eq 1" "id:2,phase:1"
+"#,
+    )
+    .unwrap();
+    let RuleGroup::Chain(chain) = &rules.phase1[0] else {
+        panic!("expected chain");
+    };
+    assert!(matches!(
+        chain[0].actions.disruptive,
+        Some(aegis_engine::model::Disruptive::Deny { status: 403 })
+    ));
 }
 
 #[test]

@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use crate::error::EngineError;
 use crate::model::{
-    CompiledRule, CompiledRules, Disruptive, Phase, Prefilter, PrefilterVariant, RuleGroup, SetVar,
-    SetVarOp,
+    CompiledRule, CompiledRules, Disruptive, Phase, Prefilter, PrefilterHits, PrefilterVariant,
+    RuleGroup, SetVar, SetVarOp,
 };
 use crate::variables::request::{RequestContext, RequestView};
 use crate::variables::tx::expand_macros;
@@ -95,11 +95,17 @@ impl EvaluationState {
                 let first = first_rule(group);
                 if let Some(rule_prefilter) = &first.prefilter {
                     let variant_hits = &hits[rule_prefilter.variant];
-                    if !rule_prefilter
-                        .patterns
-                        .iter()
-                        .any(|id| variant_hits.get(*id).copied().unwrap_or(false))
-                    {
+                    let matched = if !rule_prefilter.ac_patterns.is_empty() {
+                        rule_prefilter
+                            .ac_patterns
+                            .iter()
+                            .any(|id| variant_hits.ac.get(*id).copied().unwrap_or(false))
+                    } else if let Some(index) = rule_prefilter.regex_pattern {
+                        variant_hits.regex.get(index).copied().unwrap_or(false)
+                    } else {
+                        true
+                    };
+                    if !matched {
                         continue;
                     }
                 }
@@ -111,13 +117,20 @@ impl EvaluationState {
                     }
                 }
                 RuleGroup::Chain(chain) => {
+                    let mut all_match = true;
                     for rule in chain {
                         if !self.rule_matches(rule) {
+                            all_match = false;
                             break;
                         }
-                        self.apply_actions(rule);
-                        if self.decision.is_decisive() {
-                            break;
+                        self.apply_non_disruptive(rule);
+                    }
+                    if all_match {
+                        for rule in chain {
+                            self.apply_disruptive(rule);
+                            if self.decision.is_decisive() {
+                                break;
+                            }
                         }
                     }
                 }
@@ -182,6 +195,11 @@ impl EvaluationState {
     }
 
     fn apply_actions(&mut self, rule: &CompiledRule) {
+        self.apply_non_disruptive(rule);
+        self.apply_disruptive(rule);
+    }
+
+    fn apply_non_disruptive(&mut self, rule: &CompiledRule) {
         for setvar in &rule.actions.setvars {
             self.apply_setvar(setvar);
         }
@@ -197,14 +215,22 @@ impl EvaluationState {
             .map(|template| expand_macros(template, self.context.tx()));
         self.matched.push(RuleMatch {
             id: rule.id,
-            msg: msg.clone(),
+            msg,
             severity: rule.actions.severity.clone(),
             tags: rule.actions.tags.clone(),
             logdata,
             log: rule.actions.log,
         });
+    }
+
+    fn apply_disruptive(&mut self, rule: &CompiledRule) {
         match &rule.actions.disruptive {
             Some(Disruptive::Deny { status }) => {
+                let msg = rule
+                    .actions
+                    .msg
+                    .as_ref()
+                    .map(|template| expand_macros(template, self.context.tx()));
                 self.decision = Decision::Block {
                     status: *status,
                     rule_id: rule.id,
@@ -269,14 +295,20 @@ fn first_rule(group: &RuleGroup) -> &CompiledRule {
     }
 }
 
-fn scan_variant(variant: &PrefilterVariant, context: &RequestContext) -> Vec<bool> {
-    let mut hits = vec![false; variant.pattern_count];
+fn scan_variant(variant: &PrefilterVariant, context: &RequestContext) -> PrefilterHits {
+    if variant.matcher.is_none() && variant.regex_set.is_none() {
+        return PrefilterHits::default();
+    }
+    let mut hits = PrefilterHits {
+        ac: vec![false; variant.ac_pattern_count],
+        regex: vec![false; variant.regex_pattern_count],
+    };
     context.for_each_prefilter_value(variant.scope, |value| {
         if value.is_empty() {
             return;
         }
         if variant.transforms.is_empty() {
-            mark_matches(&variant.matcher, value, &mut hits);
+            scan_value(variant, value, &mut hits);
         } else {
             let mut current = value.to_string();
             let mut next = String::new();
@@ -286,10 +318,23 @@ fn scan_variant(variant: &PrefilterVariant, context: &RequestContext) -> Vec<boo
                 next.push_str(&result);
                 std::mem::swap(&mut current, &mut next);
             }
-            mark_matches(&variant.matcher, &current, &mut hits);
+            scan_value(variant, &current, &mut hits);
         }
     });
     hits
+}
+
+fn scan_value(variant: &PrefilterVariant, value: &str, hits: &mut PrefilterHits) {
+    if let Some(matcher) = &variant.matcher {
+        mark_matches(matcher, value, &mut hits.ac);
+    }
+    if let Some(regex_set) = &variant.regex_set {
+        for index in regex_set.matches(value).iter() {
+            if let Some(slot) = hits.regex.get_mut(index) {
+                *slot = true;
+            }
+        }
+    }
 }
 
 fn mark_matches(matcher: &aho_corasick::AhoCorasick, value: &str, hits: &mut [bool]) {
@@ -300,7 +345,7 @@ fn mark_matches(matcher: &aho_corasick::AhoCorasick, value: &str, hits: &mut [bo
     }
 }
 
-fn prefilter_hits(prefilter: &Prefilter, context: &RequestContext) -> Vec<Vec<bool>> {
+fn prefilter_hits(prefilter: &Prefilter, context: &RequestContext) -> Vec<PrefilterHits> {
     prefilter
         .variants
         .iter()
@@ -325,6 +370,7 @@ pub fn evaluate(rules: &CompiledRules, view: &RequestView<'_>) -> Evaluation {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
     use std::fs;
 
     use http::{HeaderMap, HeaderValue};
@@ -558,6 +604,23 @@ SecRule ARGS "@contains x" "id:7002,phase:1,deny,status:402"
     }
 
     #[test]
+    fn chain_starter_block_only_applies_when_chain_matches() {
+        let rules = load(
+            r#"
+SecRule REQUEST_HEADERS:X-A "@eq 1" "id:1,phase:1,chain,block"
+SecRule REQUEST_HEADERS:X-B "@eq 1" "id:2,phase:1"
+"#,
+        );
+        let failed = eval(&rules, "GET", "/", &[("x-a", "1")], b"");
+        assert_eq!(failed.decision, Decision::Pass);
+        let blocked = eval(&rules, "GET", "/", &[("x-a", "1"), ("x-b", "1")], b"");
+        assert!(matches!(
+            blocked.decision,
+            Decision::Block { rule_id: 1, .. }
+        ));
+    }
+
+    #[test]
     fn failed_chain_keeps_non_disruptive_setvar() {
         let rules = load(
             r#"
@@ -644,12 +707,52 @@ SecRule REQUEST_METHOD "@eq GET" "id:9003,phase:1,pass"
     }
 
     #[test]
-    fn case_insensitive_regex_is_not_prefiltered() {
+    fn case_insensitive_regex_matches_regardless_of_case() {
         let rules = load(r#"SecRule ARGS "@rx (?i)secret" "id:9103,phase:1,deny""#);
         let blocked = eval(&rules, "GET", "/?q=SECRET", &[], b"");
         assert!(matches!(
             blocked.decision,
             Decision::Block { rule_id: 9103, .. }
+        ));
+        let passed = eval(&rules, "GET", "/?q=hello", &[], b"");
+        assert_eq!(passed.decision, Decision::Pass);
+    }
+
+    #[test]
+    fn case_insensitive_regex_set_is_used_for_large_sets() {
+        let mut text = String::new();
+        for index in 0..8 {
+            writeln!(
+                text,
+                "SecRule ARGS \"@rx (?i)secret{index}\" \"id:{},phase:1,pass\"",
+                9100 + index
+            )
+            .unwrap();
+        }
+        let rules = load(&text);
+        assert!(rules.prefilter_stats().regex_groups >= 1);
+        let evaluation = eval(&rules, "GET", "/?q=SECRET3", &[], b"");
+        assert_eq!(evaluation.decision, Decision::Pass);
+        assert!(evaluation.matched.iter().any(|matched| matched.id == 9103));
+    }
+
+    #[test]
+    fn case_insensitive_regex_with_transforms_matches() {
+        let rules = load(r#"SecRule ARGS "@rx (?i)secret" "id:9106,phase:1,deny,t:lowercase""#);
+        let blocked = eval(&rules, "GET", "/?q=SECRET", &[], b"");
+        assert!(matches!(
+            blocked.decision,
+            Decision::Block { rule_id: 9106, .. }
+        ));
+    }
+
+    #[test]
+    fn regex_matching_empty_is_not_prefiltered() {
+        let rules = load(r#"SecRule ARGS "@rx .*" "id:9107,phase:1,deny""#);
+        let blocked = eval(&rules, "GET", "/?q=hello", &[], b"");
+        assert!(matches!(
+            blocked.decision,
+            Decision::Block { rule_id: 9107, .. }
         ));
     }
 

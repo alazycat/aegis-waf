@@ -58,9 +58,25 @@ fn reports_parse_error_with_line_and_column() {
         "unexpected message: {message}"
     );
     assert!(
-        message.contains("expects 3 arguments"),
+        message.contains("expects 2 or 3 arguments"),
         "unexpected message: {message}"
     );
+}
+
+#[test]
+fn parses_secrule_without_actions() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("rules.conf");
+    fs::write(&path, "SecRule TX:EARLY_BLOCKING \"@eq 1\"\n").unwrap();
+    let directives = parse_files(&[path]).unwrap();
+    match &directives[0].directive {
+        Directive::Rule(rule) => {
+            assert_eq!(rule.variables, "TX:EARLY_BLOCKING");
+            assert_eq!(rule.operator, "@eq 1");
+            assert_eq!(rule.actions, "");
+        }
+        other => panic!("unexpected directive: {other:?}"),
+    }
 }
 
 #[test]

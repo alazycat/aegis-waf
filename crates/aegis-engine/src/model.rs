@@ -32,8 +32,10 @@ pub struct Prefilter {
 
 #[derive(Debug, Clone)]
 pub struct PrefilterVariant {
-    pub matcher: Arc<aho_corasick::AhoCorasick>,
-    pub pattern_count: usize,
+    pub matcher: Option<Arc<aho_corasick::AhoCorasick>>,
+    pub regex_set: Option<Arc<regex::RegexSet>>,
+    pub ac_pattern_count: usize,
+    pub regex_pattern_count: usize,
     pub scope: PrefilterScope,
     pub transforms: Vec<Transform>,
 }
@@ -41,7 +43,24 @@ pub struct PrefilterVariant {
 #[derive(Debug, Clone)]
 pub struct RulePrefilter {
     pub variant: usize,
-    pub patterns: Vec<usize>,
+    pub ac_patterns: Vec<usize>,
+    pub regex_pattern: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PrefilterHits {
+    pub ac: Vec<bool>,
+    pub regex: Vec<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PrefilterStats {
+    pub total_groups: usize,
+    pub prefiltered_groups: usize,
+    pub ac_groups: usize,
+    pub regex_groups: usize,
+    pub total_rules: usize,
+    pub prefiltered_rules: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,4 +153,29 @@ pub struct CompiledRules {
     pub phase1: Vec<RuleGroup>,
     pub phase2: Vec<RuleGroup>,
     pub prefilter: Option<Prefilter>,
+}
+
+impl CompiledRules {
+    pub fn prefilter_stats(&self) -> PrefilterStats {
+        let mut stats = PrefilterStats::default();
+        for group in self.phase1.iter().chain(self.phase2.iter()) {
+            stats.total_groups += 1;
+            let (first, rule_count) = match group {
+                RuleGroup::Single(rule) => (rule.as_ref(), 1),
+                RuleGroup::Chain(rules) => (&rules[0], rules.len()),
+            };
+            stats.total_rules += rule_count;
+            if let Some(prefilter) = &first.prefilter {
+                stats.prefiltered_groups += 1;
+                stats.prefiltered_rules += rule_count;
+                if !prefilter.ac_patterns.is_empty() {
+                    stats.ac_groups += 1;
+                }
+                if prefilter.regex_pattern.is_some() {
+                    stats.regex_groups += 1;
+                }
+            }
+        }
+        stats
+    }
 }
