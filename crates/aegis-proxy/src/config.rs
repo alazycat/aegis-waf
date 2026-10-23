@@ -77,30 +77,20 @@ pub struct AuditConfig {
     pub matched_rules_limit: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HostHeader {
+    #[default]
     Preserve,
     Rewrite,
 }
 
-impl Default for HostHeader {
-    fn default() -> Self {
-        Self::Preserve
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OnError {
+    #[default]
     Block,
     Pass,
-}
-
-impl Default for OnError {
-    fn default() -> Self {
-        Self::Block
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -111,17 +101,12 @@ pub enum AuditSink {
     None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditMode {
+    #[default]
     BlockedOnly,
     All,
-}
-
-impl Default for AuditMode {
-    fn default() -> Self {
-        Self::BlockedOnly
-    }
 }
 
 fn default_connect_timeout_ms() -> u64 {
