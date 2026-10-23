@@ -93,7 +93,8 @@ async fn start_proxy(upstream: SocketAddr) -> (SocketAddr, tokio::task::JoinHand
         aegis_proxy::rules::RulesManager::load_initial(&[dir.path().join("rules.conf")], false)
             .unwrap(),
     );
-    let state = Arc::new(aegis_proxy::state::AppState::new(config, rules).unwrap());
+    let (audit, _audit_receiver) = aegis_proxy::audit_sink::AuditHandle::channel(64);
+    let state = Arc::new(aegis_proxy::state::AppState::new(config, rules, audit).unwrap());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {

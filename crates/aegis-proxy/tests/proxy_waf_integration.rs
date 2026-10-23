@@ -1,7 +1,9 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -14,14 +16,21 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 
+use aegis_proxy::config::{AuditMode, AuditSink};
+
 struct Harness {
     proxy: SocketAddr,
     hits: Arc<AtomicUsize>,
+    audit_path: PathBuf,
     _dir: tempfile::TempDir,
     handle: tokio::task::JoinHandle<()>,
 }
 
 async fn harness(rules: &str) -> Harness {
+    harness_with_audit(rules, AuditSink::None, AuditMode::BlockedOnly).await
+}
+
+async fn harness_with_audit(rules: &str, sink: AuditSink, mode: AuditMode) -> Harness {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_addr = listener.local_addr().unwrap();
     let hits = Arc::new(AtomicUsize::new(0));
@@ -51,6 +60,7 @@ async fn harness(rules: &str) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let rules_path = dir.path().join("rules.conf");
     std::fs::write(&rules_path, rules).unwrap();
+    let audit_path = dir.path().join("audit.jsonl");
     let config = aegis_proxy::Config {
         listen: "127.0.0.1:0".to_string(),
         upstream: aegis_proxy::config::UpstreamConfig {
@@ -76,17 +86,22 @@ async fn harness(rules: &str) -> Harness {
         },
         on_error: aegis_proxy::config::OnError::Block,
         audit: aegis_proxy::config::AuditConfig {
-            sink: aegis_proxy::config::AuditSink::None,
-            path: None,
-            mode: aegis_proxy::config::AuditMode::BlockedOnly,
-            queue_capacity: 8192,
+            sink,
+            path: Some(audit_path.display().to_string()),
+            mode,
+            queue_capacity: 1024,
             include_query: false,
             matched_rules_limit: 16,
         },
     };
     let rules =
         Arc::new(aegis_proxy::rules::RulesManager::load_initial(&[rules_path], false).unwrap());
-    let state = Arc::new(aegis_proxy::state::AppState::new(config, rules).unwrap());
+    let (audit, audit_receiver) = aegis_proxy::audit_sink::AuditHandle::channel(1024);
+    tokio::spawn(aegis_proxy::audit_sink::run(
+        config.audit.clone(),
+        audit_receiver,
+    ));
+    let state = Arc::new(aegis_proxy::state::AppState::new(config, rules, audit).unwrap());
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy = proxy_listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
@@ -95,9 +110,22 @@ async fn harness(rules: &str) -> Harness {
     Harness {
         proxy,
         hits,
+        audit_path,
         _dir: dir,
         handle,
     }
+}
+
+async fn wait_for_audit(path: &Path) -> String {
+    for _ in 0..50 {
+        if let Ok(text) = tokio::fs::read_to_string(path).await {
+            if !text.is_empty() {
+                return text;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    String::new()
 }
 
 async fn send(addr: SocketAddr, request: Request<Full<Bytes>>) -> (StatusCode, String) {
@@ -203,5 +231,50 @@ async fn body_over_limit_returns_413_before_upstream() {
     let (status, _) = send(harness.proxy, request).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(harness.hits.load(Ordering::SeqCst), 0);
+    harness.handle.abort();
+}
+
+#[tokio::test]
+async fn writes_block_event_to_jsonl() {
+    let harness = harness_with_audit(
+        r#"SecRule ARGS "@rx <script" "id:1001,phase:1,deny,status:403""#,
+        AuditSink::File,
+        AuditMode::BlockedOnly,
+    )
+    .await;
+    let (status, _) = send(harness.proxy, get("http://example.test/?q=%3Cscript%3E")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let text = wait_for_audit(&harness.audit_path).await;
+    assert!(text.contains("\"decision\":\"block\""), "audit: {text}");
+    assert!(text.contains("\"rule_id\":1001"), "audit: {text}");
+    assert!(text.contains("\"event_version\":1"), "audit: {text}");
+    harness.handle.abort();
+}
+
+#[tokio::test]
+async fn all_mode_writes_pass_events() {
+    let harness = harness_with_audit(r#"SecMarker START"#, AuditSink::File, AuditMode::All).await;
+    let (status, _) = send(harness.proxy, get("http://example.test/ok")).await;
+    assert_eq!(status, StatusCode::OK);
+    let text = wait_for_audit(&harness.audit_path).await;
+    assert!(text.contains("\"decision\":\"pass\""), "audit: {text}");
+    harness.handle.abort();
+}
+
+#[tokio::test]
+async fn blocked_only_mode_skips_pass_events() {
+    let harness = harness_with_audit(
+        r#"SecMarker START"#,
+        AuditSink::File,
+        AuditMode::BlockedOnly,
+    )
+    .await;
+    let (status, _) = send(harness.proxy, get("http://example.test/ok")).await;
+    assert_eq!(status, StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let text = tokio::fs::read_to_string(&harness.audit_path)
+        .await
+        .unwrap_or_default();
+    assert!(text.is_empty(), "unexpected audit event: {text}");
     harness.handle.abort();
 }
