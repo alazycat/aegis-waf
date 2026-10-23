@@ -67,21 +67,47 @@ fn blocked_status(status: u16) -> StatusCode {
 }
 
 pub async fn serve_on(listener: TcpListener, state: Arc<AppState>) -> anyhow::Result<()> {
+    let (shutdown_sender, shutdown_receiver) = tokio::sync::watch::channel(false);
+    let result = serve_on_with_shutdown(listener, state, shutdown_receiver).await;
+    drop(shutdown_sender);
+    result
+}
+
+pub async fn serve_on_with_shutdown(
+    listener: TcpListener,
+    state: Arc<AppState>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let mut connections = tokio::task::JoinSet::new();
     loop {
-        let (stream, peer) = listener.accept().await?;
-        let header_timeout = Duration::from_millis(state.config.limits.header_read_timeout_ms);
-        let state = state.clone();
-        tokio::spawn(async move {
-            let io = TokioIo::new(stream);
-            let service = service_fn(move |request| handle(request, state.clone(), peer));
-            let mut builder = hyper::server::conn::http1::Builder::new();
-            builder.timer(TokioTimer::new());
-            builder.header_read_timeout(header_timeout);
-            if let Err(error) = builder.serve_connection(io, service).await {
-                debug!(%peer, %error, "connection closed");
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
             }
-        });
+            accepted = listener.accept() => {
+                let (stream, peer) = accepted?;
+                let header_timeout =
+                    Duration::from_millis(state.config.limits.header_read_timeout_ms);
+                let state = state.clone();
+                connections.spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let service = service_fn(move |request| handle(request, state.clone(), peer));
+                    let mut builder = hyper::server::conn::http1::Builder::new();
+                    builder.timer(TokioTimer::new());
+                    builder.header_read_timeout(header_timeout);
+                    if let Err(error) = builder.serve_connection(io, service).await {
+                        debug!(%peer, %error, "connection closed");
+                    }
+                });
+            }
+        }
     }
+    let drain = async { while connections.join_next().await.is_some() {} };
+    let _ = tokio::time::timeout(Duration::from_secs(10), drain).await;
+    connections.abort_all();
+    Ok(())
 }
 
 struct Outcome {
