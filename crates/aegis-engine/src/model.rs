@@ -67,23 +67,85 @@ pub struct PrefilterStats {
 pub enum Phase {
     Phase1,
     Phase2,
+    Phase3,
+    Phase4,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Variable {
     RequestUri,
+    RequestUriRaw,
+    RequestLine,
+    RequestProtocol,
+    RequestBasename,
     RequestMethod,
     QueryString,
     RequestFilename,
     RequestHeaders(Option<String>),
-    Args,
-    ArgsGet,
-    ArgsPost,
+    RequestHeadersNames,
+    Args(Option<String>),
+    ArgsGet(Option<String>),
+    ArgsPost(Option<String>),
     ArgsNames,
     RequestCookies(Option<String>),
+    RequestCookiesNames,
     RequestBody,
+    RequestBodyLength,
     RemoteAddr,
+    MatchedVar,
+    MatchedVarName,
+    Xml(Option<String>),
+    ResponseStatus,
+    ResponseHeaders(Option<String>),
+    ResponseHeadersNames,
+    ResponseBody,
+    ResponseBodyLength,
+    ResponseContentType,
     Tx(Option<String>),
+}
+
+impl Variable {
+    pub fn display_name(&self) -> String {
+        match self {
+            Self::RequestUri => "REQUEST_URI".to_string(),
+            Self::RequestUriRaw => "REQUEST_URI_RAW".to_string(),
+            Self::RequestLine => "REQUEST_LINE".to_string(),
+            Self::RequestProtocol => "REQUEST_PROTOCOL".to_string(),
+            Self::RequestBasename => "REQUEST_BASENAME".to_string(),
+            Self::RequestMethod => "REQUEST_METHOD".to_string(),
+            Self::QueryString => "QUERY_STRING".to_string(),
+            Self::RequestFilename => "REQUEST_FILENAME".to_string(),
+            Self::RequestHeaders(None) => "REQUEST_HEADERS".to_string(),
+            Self::RequestHeaders(Some(name)) => format!("REQUEST_HEADERS:{name}"),
+            Self::RequestHeadersNames => "REQUEST_HEADERS_NAMES".to_string(),
+            Self::Args(None) => "ARGS".to_string(),
+            Self::Args(Some(name)) => format!("ARGS:{name}"),
+            Self::ArgsGet(None) => "ARGS_GET".to_string(),
+            Self::ArgsGet(Some(name)) => format!("ARGS_GET:{name}"),
+            Self::ArgsPost(None) => "ARGS_POST".to_string(),
+            Self::ArgsPost(Some(name)) => format!("ARGS_POST:{name}"),
+            Self::ArgsNames => "ARGS_NAMES".to_string(),
+            Self::RequestCookies(None) => "REQUEST_COOKIES".to_string(),
+            Self::RequestCookies(Some(name)) => format!("REQUEST_COOKIES:{name}"),
+            Self::RequestCookiesNames => "REQUEST_COOKIES_NAMES".to_string(),
+            Self::RequestBody => "REQUEST_BODY".to_string(),
+            Self::RequestBodyLength => "REQUEST_BODY_LENGTH".to_string(),
+            Self::RemoteAddr => "REMOTE_ADDR".to_string(),
+            Self::MatchedVar => "MATCHED_VAR".to_string(),
+            Self::MatchedVarName => "MATCHED_VAR_NAME".to_string(),
+            Self::Xml(None) => "XML".to_string(),
+            Self::Xml(Some(selector)) => format!("XML:{selector}"),
+            Self::ResponseStatus => "RESPONSE_STATUS".to_string(),
+            Self::ResponseHeaders(None) => "RESPONSE_HEADERS".to_string(),
+            Self::ResponseHeaders(Some(name)) => format!("RESPONSE_HEADERS:{name}"),
+            Self::ResponseHeadersNames => "RESPONSE_HEADERS_NAMES".to_string(),
+            Self::ResponseBody => "RESPONSE_BODY".to_string(),
+            Self::ResponseBodyLength => "RESPONSE_BODY_LENGTH".to_string(),
+            Self::ResponseContentType => "RESPONSE_CONTENT_TYPE".to_string(),
+            Self::Tx(None) => "TX".to_string(),
+            Self::Tx(Some(name)) => format!("TX:{name}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +174,21 @@ pub enum Disruptive {
     Allow,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleEngineMode {
+    On,
+    Off,
+    DetectionOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CtlAction {
+    AuditEngine(bool),
+    RuleEngine(RuleEngineMode),
+    RemoveRuleById(u32),
+    RemoveRuleByTag(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledActions {
     pub disruptive: Option<Disruptive>,
@@ -122,6 +199,8 @@ pub struct CompiledActions {
     pub setvars: Vec<SetVar>,
     pub logdata: Option<String>,
     pub chain: bool,
+    pub capture: bool,
+    pub ctl: Vec<CtlAction>,
 }
 
 #[derive(Debug, Clone)]
@@ -152,13 +231,21 @@ pub struct CompiledRules {
     pub files: Vec<PathBuf>,
     pub phase1: Vec<RuleGroup>,
     pub phase2: Vec<RuleGroup>,
+    pub phase3: Vec<RuleGroup>,
+    pub phase4: Vec<RuleGroup>,
     pub prefilter: Option<Prefilter>,
 }
 
 impl CompiledRules {
     pub fn prefilter_stats(&self) -> PrefilterStats {
         let mut stats = PrefilterStats::default();
-        for group in self.phase1.iter().chain(self.phase2.iter()) {
+        for group in self
+            .phase1
+            .iter()
+            .chain(self.phase2.iter())
+            .chain(self.phase3.iter())
+            .chain(self.phase4.iter())
+        {
             stats.total_groups += 1;
             let (first, rule_count) = match group {
                 RuleGroup::Single(rule) => (rule.as_ref(), 1),

@@ -292,6 +292,11 @@ bash scripts/bench_e2e.sh
 
 > 以下为多次运行的代表值。测量期间测试机同时有 Chrome 等负载，绝对数字有约
 > 20–40% 的波动；相对结论和 CRS 覆盖率数据不受影响。
+>
+> 2026-10-23 后续加入 libinjection、capture/MATCHED_VAR、ctl 和响应阶段后，匹配路径会
+> 额外克隆命中值并写入 MATCHED_VAR/TX。关键场景重测：500 条 contains 不命中 2.72 µs、
+> 命中 1 条 3.62 µs；500 条 regex+lowercase 不命中 3.01 µs、命中 4.04 µs；500 条 `(?i)`
+> 不命中 3.40 µs、命中 4.45 µs。整体结论不变。
 
 | 场景 | 优化后耗时 | 单线程吞吐 |
 |---|---:|---:|
@@ -352,6 +357,9 @@ bash scripts/bench_e2e.sh
 该轮整体数字受系统负载影响偏低；同一轮中 `(?i)` RegexSet 与普通 regex+lowercase
 变体的吞吐接近，说明 RegexSet 的端到端开销与 AC 变体相当，主要差异在引擎微基准中。
 
+> 以上端到端数据为请求/响应能力扩展前的测量。扩展后请求匹配路径增加少量
+> `MATCHED_VAR`/TX 写入和响应阶段检查；在网络路径中占比很小，未重新完整跑矩阵。
+
 ### 12.4 仍然存在的边界
 
 - RegexSet 只在同一变换变体内 regex 模式数 ≥ 8 时启用；小集合逐条求值，这是刻意
@@ -362,11 +370,11 @@ bash scripts/bench_e2e.sh
 - 每个变体都会对扫描范围内的值应用变换；body 很大且变体很多时，预筛成本会上升。
   后续可以按“规则是否真的需要 body”进一步缩小变体扫描范围，或对大 body 做采样策略。
 
-## 13. 真实 CRS 子集预筛覆盖率
+## 13. 真实 CRS 子集覆盖率（含响应阶段）
 
 - 日期：2026-10-23
 - CRS：`coreruleset/coreruleset`，commit `58ff33b`（v4.31.0-dev）
-- 规则文件：`crs-setup.conf.example` + `rules/REQUEST-*.conf`（18 个 REQUEST 文件）
+- 规则文件：`crs-setup.conf.example` + 18 个 `REQUEST-*.conf` + 9 个 `RESPONSE-*.conf`
 - 加载方式：`lenient: true`，不支持的变量/算子/动作/阶段会被跳过
 - 工具：`crates/aegis-engine/examples/prefilter_report.rs`
 - 复现：`bash scripts/bench_crs.sh`（CRS 下载到 `target/crs`，不提交到仓库）
@@ -375,73 +383,124 @@ bash scripts/bench_e2e.sh
 
 | 指标 | 数值 |
 |---|---:|
-| 请求文件 | 19 |
-| 可解析文件 | 19 |
-| `SecRule`/`SecAction` 指令 | 527 |
-| 编译成功规则 | 192（36.4%） |
-| 跳过的规则指令 | 339（63.8%） |
+| 请求文件 | 28 |
+| 可解析文件 | 28 |
+| `SecRule`/`SecAction` 指令 | 693 |
+| 编译成功规则 | 541（78.1%） |
+| 跳过的规则指令 | 160（23.1%） |
 | `SecDefaultAction` | 5 |
-| 阶段分组 | 181 |
+| 阶段分组 | 511 |
 
-跳过的主要原因：CRS 中大量规则依赖引擎尚未支持的变量
-（`REQUEST_HEADERS_NAMES`、`FILES`、`XML`、`REQUEST_LINE` 等）、
-算子（`@detectSQLi`、`@detectXSS` 等）、动作/集合和响应阶段。
+剩余跳过的主要原因是引擎尚未支持的：
+
+- `FILES` / `FILES_NAMES` / multipart 文件变量；
+- `@pmFromFile`；
+- `MATCHED_VARS`、持久化集合（`ip.`/`session.`）等变量；
+- Phase 5 日志规则；
+- 部分 CRS 专属动作/变换。
 
 ### 13.2 预筛覆盖率
 
 | 指标 | 数值 |
 |---|---:|
-| 分组总数 | 181 |
-| 预筛分组 | 26（14.4%） |
-| 其中 AC | 17 组 / 19 规则 |
+| 分组总数 | 511 |
+| 预筛分组 | 37（7.2%） |
+| 其中 AC | 28 组 / 39 规则 |
 | 其中 RegexSet | 9 组 / 11 规则 |
-| 规则总数（按分组统计） | 192 |
-| 预筛规则 | 30（15.6%） |
-| 非 `SecAction` 算子的分组 | 177 |
-| 非 `SecAction` 算子的预筛分组 | 26（14.7%） |
-| **非 TX 算子分组** | **46** |
-| **非 TX 算子预筛分组** | **26（56.5%）** |
-| **非 TX 算子规则** | **57** |
-| **非 TX 算子预筛规则** | **30（52.6%）** |
+| 规则总数（按分组统计） | 541 |
+| 预筛规则 | 50（9.2%） |
+| 非 `SecAction` 算子的分组 | 505 |
+| 非 `SecAction` 算子的预筛分组 | 37（7.3%） |
+| **非 TX 算子分组** | **283** |
+| **非 TX 算子预筛分组** | **37（13.1%）** |
+| **非 TX 算子规则** | **311** |
+| **非 TX 算子预筛规则** | **50（16.1%）** |
 
 分组原因分解：
 
 | 原因 | 分组 | 规则 |
 |---|---:|---:|
-| AC 字面量 | 17 | 19 |
+| AC 字面量 | 28 | 39 |
 | RegexSet | 9 | 11 |
-| `SecAction` 无条件规则 | 4 | 4 |
-| 含 TX 变量（异常评分） | 131 | 131 |
-| 算子取反 | 6 | 6 |
-| 匹配空字符串的 regex | 3 | 5 |
-| 小 regex 集合（< 8 个模式） | 10 | 15 |
-| 其他不可预筛算子 | 1 | 1 |
+| `SecAction` 无条件规则 | 6 | 6 |
+| 含 TX 变量（异常评分） | 222 | 224 |
+| 响应变量规则（Phase 3/4） | 54 | 55 |
+| 算子取反 | 9 | 9 |
+| 匹配空字符串的 regex | 5 | 9 |
+| 小 regex 集合（< 8 个模式） | 164 | 172 |
+| `REMOTE_ADDR` 规则 | 1 | 3 |
+| 其他不可预筛算子 | 13 | 13 |
 
 ### 13.3 解释
 
-- **总体覆盖率低的主要原因是 CRS 的异常评分规则**：131 个分组（占分组总数 72%）
-  只读写 `TX` 变量做数值累计/比较。这些规则本身没有可提取的请求字面量，
-  也不适合用 Aho-Corasick 预筛；它们是廉价的整数比较，逐条求值成本远低于
-  请求扫描本身。
-- 去掉 TX 规则后，非 TX 算子规则的预筛覆盖率是 **52.6%**。剩余未预筛的原因：
-  - 6 条算子取反规则（不能用“必须出现”做预筛）；
-  - 5 条匹配空字符串的 regex（预筛会命中所有值）；
-  - 15 条属于小 regex 集合（同一变换变体内 < 8 个 `(?i)`/无字面量 regex），
-    按第 12 节的阈值逐条求值；
-  - 1 条其他不可预筛算子。
-- 如果把 RegexSet 阈值降到 1，非 TX 覆盖率会升到约 78.9%，但示例规则的小集合
-  延迟会从约 2.4 µs 退化到约 4.3 µs。当前选择 8 是性能与覆盖率的折中。
-- **63.8% 的 CRS 规则指令未能编译**，这是当前引擎兼容性的主要限制，
-  不是预筛覆盖率的问题。要提高真实 CRS 覆盖率，优先补齐：
-  - `REQUEST_HEADERS_NAMES`、`REQUEST_LINE`、`FILES`、`XML` 等变量；
-  - `@detectSQLi` / `@detectXSS`（libinjection）；
-  - `capture`、`ctl`、`skipAfter`、持久化集合；
-  - 响应阶段（Phase 3/4）；
-  - 更多 CRS 动作/变换。
+- **总体覆盖率低的主因仍是 TX 异常评分规则**：222 个分组只读写 `TX` 做数值累计/比较，
+  没有可提取的请求字面量；它们是廉价的整数比较，逐条求值成本很低。
+- **响应阶段规则（54 组 / 55 规则）** 使用 `RESPONSE_STATUS`、`RESPONSE_HEADERS`、
+  `RESPONSE_BODY` 等变量，不在请求预筛范围内；代理在收到上游响应后执行 Phase 3/4。
+- 去掉 TX 和响应规则后，非 TX 请求算子规则的预筛覆盖率约为 **16.1%**。
+  剩余未预筛的主要是小 regex 集合（172 条，同一变换变体内 < 8 个模式），
+  按第 12 节阈值逐条求值；其次是取反算子、空匹配 regex、`REMOTE_ADDR` 等。
+- 如果把 RegexSet 阈值降到 1，预筛覆盖会显著上升，但小规则集会退化；
+  当前阈值 8 是性能与覆盖率的折中。
+- **78.1% 的 CRS 规则指令已能编译**，比上一轮（36.4%）大幅提升，主要来自：
+  新增变量、libinjection、capture、ctl 子集、Phase 3/4。
+  剩余 23.1% 主要是 multipart/FILES、`@pmFromFile`、持久化集合和 Phase 5。
 
 ### 13.4 局限
 
 - 这是“引擎能编译的子集”的覆盖率，不代表对完整 CRS 的检测效果。
 - `lenient: true` 会跳过不支持的特性，可能导致部分规则语义不完整。
+- 响应体检测仅在 `Content-Length` 存在且不超过 `max_response_body_bytes` 时执行；
+  chunked 或超大响应只做 Phase 3 头检测，并直接透传响应体。
 - CRS 规则来自外部仓库，版本更新后数字会变化。
 - 覆盖率是静态统计，不等于运行时命中率或误报率。
+
+## 14. 请求/响应能力扩展（2026-10-23）
+
+### 14.1 新增变量
+
+- 请求：`REQUEST_URI_RAW`、`REQUEST_LINE`、`REQUEST_PROTOCOL`、`REQUEST_BASENAME`、
+  `REQUEST_HEADERS_NAMES`、`REQUEST_COOKIES_NAMES`、`REQUEST_BODY_LENGTH`、
+  `ARGS:name` / `ARGS_GET:name` / `ARGS_POST:name` 选择器。
+- 匹配上下文：`MATCHED_VAR`、`MATCHED_VAR_NAME`。
+- XML：`XML` / `XML:/*` 提取元素文本与属性值（使用 `roxmltree`）。
+- 响应：`RESPONSE_STATUS`、`RESPONSE_HEADERS[:name]`、`RESPONSE_HEADERS_NAMES`、
+  `RESPONSE_BODY`、`RESPONSE_BODY_LENGTH`、`RESPONSE_CONTENT_TYPE`。
+
+### 14.2 libinjection
+
+- 使用纯 Rust 的 `barbacane-libinjection`（crate 名 `libinjectionrs`），
+  与 C 版做过差分测试，Windows 上无需 C 工具链。
+- 支持 `@detectSQLi` 与 `@detectXSS`，两者不做字面量预筛，逐条求值。
+
+### 14.3 capture / MATCHED_VAR
+
+- 支持 `capture` 动作：正则捕获组写入 `TX:0..9`，并设置
+  `MATCHED_VAR` / `MATCHED_VAR_NAME`。
+- 宏展开支持 `%{TX.n}`、`%{MATCHED_VAR}`、`%{MATCHED_VAR_NAME}`（大小写不敏感）。
+
+### 14.4 ctl 子集
+
+支持以下 `ctl`，其余 ctl 在 lenient 模式下忽略：
+
+- `ctl:auditEngine=Off|On|RelevantOnly`：关闭/开启审计事件。
+- `ctl:ruleEngine=Off|On|DetectionOnly`：关闭/开启后续破坏性动作；
+  `DetectionOnly` 目前等同于不拦截。
+- `ctl:ruleRemoveById=<id>`：后续跳过该规则。
+- `ctl:ruleRemoveByTag=<tag>`：后续跳过带该 tag 的规则（按分组首规则判断）。
+
+### 14.5 响应 Phase 3/4
+
+- 引擎新增 Phase 3（响应头）与 Phase 4（响应体）；Phase 5 仍跳过。
+- 代理在收到上游响应后：
+  1. 执行 Phase 3（`RESPONSE_STATUS` / `RESPONSE_HEADERS`）；
+  2. 若 `Content-Length` 存在且 ≤ `max_response_body_bytes`，缓冲响应体并执行 Phase 4；
+  3. 任一阶段拦截则返回规则状态码，不再透传上游响应体。
+- chunked 或超大响应只做 Phase 3，之后直接透传，避免破坏流式语义。
+
+### 14.6 验证
+
+- 139 个测试全部通过。
+- `cargo fmt --check` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+- 新增 `crates/aegis-proxy/tests/proxy_response_integration.rs` 覆盖 Phase 3/4
+  和响应体超限跳过逻辑。

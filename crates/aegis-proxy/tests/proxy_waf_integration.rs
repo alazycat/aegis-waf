@@ -81,6 +81,7 @@ async fn harness_with_audit(rules: &str, sink: AuditSink, mode: AuditMode) -> Ha
             max_header_bytes: 65536,
             max_uri_bytes: 8192,
             max_body_bytes: 1024,
+            max_response_body_bytes: 1048576,
             header_read_timeout_ms: 10000,
             body_read_timeout_ms: 15000,
         },

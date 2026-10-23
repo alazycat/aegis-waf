@@ -30,6 +30,7 @@ fn request<'a>(
         uri,
         path: uri.split_once('?').map(|(path, _)| path).unwrap_or(uri),
         query: uri.split_once('?').map(|(_, query)| query),
+        protocol: "HTTP/1.1",
         headers,
         body,
         remote_addr: "198.51.100.9".parse().unwrap(),

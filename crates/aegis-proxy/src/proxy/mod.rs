@@ -9,7 +9,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::header::CONTENT_LENGTH;
 use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode};
+use hyper::{Request, Response, StatusCode, Version};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpListener;
 use tracing::{debug, warn};
@@ -216,38 +216,171 @@ async fn process(
     }
 
     let upstream_started = Instant::now();
-    match forward::forward(state, parts, body, peer.ip()).await {
-        Ok(response) => {
-            let status = response.status();
-            Outcome {
-                response,
-                status,
-                upstream_status: Some(status.as_u16()),
-                upstream_latency_ms: Some(upstream_started.elapsed().as_millis() as u64),
-                error: None,
-                request_body_bytes: body_len,
+    let (response_parts, response_body) =
+        match forward::forward(state, parts, body, peer.ip()).await {
+            Ok(pair) => pair,
+            Err(forward::ForwardError::Timeout) => {
+                return Outcome {
+                    response: text_response(StatusCode::GATEWAY_TIMEOUT, "upstream timeout\n"),
+                    status: StatusCode::GATEWAY_TIMEOUT,
+                    upstream_status: None,
+                    upstream_latency_ms: Some(upstream_started.elapsed().as_millis() as u64),
+                    error: Some("upstream_timeout".to_string()),
+                    request_body_bytes: body_len,
+                };
             }
-        }
-        Err(forward::ForwardError::Timeout) => Outcome {
-            response: text_response(StatusCode::GATEWAY_TIMEOUT, "upstream timeout\n"),
-            status: StatusCode::GATEWAY_TIMEOUT,
-            upstream_status: None,
-            upstream_latency_ms: Some(upstream_started.elapsed().as_millis() as u64),
-            error: Some("upstream_timeout".to_string()),
-            request_body_bytes: body_len,
-        },
-        Err(forward::ForwardError::Upstream(message)) => {
-            warn!(%peer, %message, "upstream request failed");
-            Outcome {
-                response: text_response(StatusCode::BAD_GATEWAY, "upstream error\n"),
-                status: StatusCode::BAD_GATEWAY,
-                upstream_status: None,
-                upstream_latency_ms: Some(upstream_started.elapsed().as_millis() as u64),
-                error: Some(format!("upstream_error: {message}")),
-                request_body_bytes: body_len,
+            Err(forward::ForwardError::Upstream(message)) => {
+                warn!(%peer, %message, "upstream request failed");
+                return Outcome {
+                    response: text_response(StatusCode::BAD_GATEWAY, "upstream error\n"),
+                    status: StatusCode::BAD_GATEWAY,
+                    upstream_status: None,
+                    upstream_latency_ms: Some(upstream_started.elapsed().as_millis() as u64),
+                    error: Some(format!("upstream_error: {message}")),
+                    request_body_bytes: body_len,
+                };
             }
+        };
+
+    let upstream_status = response_parts.status.as_u16();
+    let upstream_latency = Some(upstream_started.elapsed().as_millis() as u64);
+
+    let inspect_response = !rules.phase3.is_empty() || !rules.phase4.is_empty();
+    if inspect_response {
+        evaluation.set_response_headers(upstream_status, &response_parts.headers);
+        evaluate_phase(evaluation, rules, Phase::Phase3);
+        if let Decision::Block { status, .. } = evaluation.decision() {
+            return blocked_with_upstream(
+                *status,
+                body_len,
+                Some(upstream_status),
+                upstream_latency,
+            );
         }
     }
+
+    let inspect_body = !rules.phase4.is_empty()
+        && content_length(&response_parts.headers)
+            .map(|length| length <= state.config.limits.max_response_body_bytes as u64)
+            .unwrap_or(false);
+
+    if inspect_body {
+        let response_body = match limits::read_body_limited(
+            response_body,
+            state.config.limits.max_response_body_bytes,
+            Duration::from_millis(state.config.limits.body_read_timeout_ms),
+        )
+        .await
+        {
+            Ok(body) => body,
+            Err(limits::BodyError::TooLarge) => {
+                return local_after_upstream(
+                    StatusCode::BAD_GATEWAY,
+                    "upstream body too large\n",
+                    body_len,
+                    upstream_status,
+                    upstream_latency,
+                    "upstream_body_too_large",
+                );
+            }
+            Err(limits::BodyError::Timeout) => {
+                return local_after_upstream(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "upstream body timeout\n",
+                    body_len,
+                    upstream_status,
+                    upstream_latency,
+                    "upstream_body_timeout",
+                );
+            }
+            Err(limits::BodyError::Hyper(error)) => {
+                warn!(%peer, %error, "failed to read upstream body");
+                return local_after_upstream(
+                    StatusCode::BAD_GATEWAY,
+                    "upstream body error\n",
+                    body_len,
+                    upstream_status,
+                    upstream_latency,
+                    "upstream_body_error",
+                );
+            }
+        };
+        evaluation.set_response_body(&response_body);
+        evaluate_phase(evaluation, rules, Phase::Phase4);
+        if let Decision::Block { status, .. } = evaluation.decision() {
+            return blocked_with_upstream(
+                *status,
+                body_len,
+                Some(upstream_status),
+                upstream_latency,
+            );
+        }
+        let downstream_status = response_parts.status;
+        Outcome {
+            response: build_response(response_parts, full_body(response_body)),
+            status: downstream_status,
+            upstream_status: Some(upstream_status),
+            upstream_latency_ms: upstream_latency,
+            error: None,
+            request_body_bytes: body_len,
+        }
+    } else {
+        let downstream_status = response_parts.status;
+        Outcome {
+            response: build_response(response_parts, response_body.boxed()),
+            status: downstream_status,
+            upstream_status: Some(upstream_status),
+            upstream_latency_ms: upstream_latency,
+            error: None,
+            request_body_bytes: body_len,
+        }
+    }
+}
+
+fn blocked_with_upstream(
+    status: u16,
+    request_body_bytes: usize,
+    upstream_status: Option<u16>,
+    upstream_latency_ms: Option<u64>,
+) -> Outcome {
+    let status = blocked_status(status);
+    Outcome {
+        response: text_response(status, "response blocked\n"),
+        status,
+        upstream_status,
+        upstream_latency_ms,
+        error: None,
+        request_body_bytes,
+    }
+}
+
+fn local_after_upstream(
+    status: StatusCode,
+    message: &'static str,
+    request_body_bytes: usize,
+    upstream_status: u16,
+    upstream_latency_ms: Option<u64>,
+    error: &str,
+) -> Outcome {
+    Outcome {
+        response: text_response(status, message),
+        status,
+        upstream_status: Some(upstream_status),
+        upstream_latency_ms,
+        error: Some(error.to_string()),
+        request_body_bytes,
+    }
+}
+
+fn build_response(parts: http::response::Parts, body: ProxyBody) -> Response<ProxyBody> {
+    let status = parts.status;
+    let mut response = Response::builder()
+        .status(status)
+        .version(Version::HTTP_11)
+        .body(body)
+        .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "internal error\n"));
+    *response.headers_mut() = parts.headers;
+    response
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -264,6 +397,9 @@ fn emit_audit(
     evaluation: &Evaluation,
     outcome: &Outcome,
 ) {
+    if evaluation.suppress_audit {
+        return;
+    }
     if !audit_sink::should_write(
         state.config.audit.mode,
         &evaluation.decision,
@@ -314,6 +450,10 @@ async fn handle(
         .to_string();
     let rules = state.rules.snapshot();
     let rules_version = rules.version;
+    let protocol = match parts.version {
+        hyper::Version::HTTP_10 => "HTTP/1.0",
+        _ => "HTTP/1.1",
+    };
 
     let mut evaluation = {
         let view = RequestView {
@@ -321,6 +461,7 @@ async fn handle(
             uri: &uri_string,
             path: &path,
             query: query.as_deref(),
+            protocol,
             headers: &parts.headers,
             body: &[],
             remote_addr: peer.ip(),

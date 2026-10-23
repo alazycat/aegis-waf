@@ -30,6 +30,8 @@ struct Breakdown {
     empty_regex_rules: usize,
     small_regex_groups: usize,
     small_regex_rules: usize,
+    response_groups: usize,
+    response_rules: usize,
     other_groups: usize,
     other_rules: usize,
 }
@@ -69,6 +71,10 @@ impl Breakdown {
                 self.small_regex_groups += 1;
                 self.small_regex_rules += rules;
             }
+            "response" => {
+                self.response_groups += 1;
+                self.response_rules += rules;
+            }
             _ => {
                 self.other_groups += 1;
                 self.other_rules += rules;
@@ -98,6 +104,7 @@ impl Breakdown {
                 self.small_regex_groups,
                 self.small_regex_rules,
             ),
+            ("response", self.response_groups, self.response_rules),
             ("other", self.other_groups, self.other_rules),
         ];
         println!("breakdown:");
@@ -121,6 +128,19 @@ fn classify_group(group: &RuleGroup) -> (&'static str, usize) {
     }
     if first.unconditional {
         return ("sec_action", rule_count);
+    }
+    if first.variables.iter().any(|spec| {
+        matches!(
+            spec.variable,
+            Variable::ResponseStatus
+                | Variable::ResponseHeaders(_)
+                | Variable::ResponseHeadersNames
+                | Variable::ResponseBody
+                | Variable::ResponseBodyLength
+                | Variable::ResponseContentType
+        )
+    }) {
+        return ("response", rule_count);
     }
     if first
         .variables
@@ -229,7 +249,13 @@ fn main() {
     );
 
     let mut breakdown = Breakdown::default();
-    for group in compiled.phase1.iter().chain(compiled.phase2.iter()) {
+    for group in compiled
+        .phase1
+        .iter()
+        .chain(compiled.phase2.iter())
+        .chain(compiled.phase3.iter())
+        .chain(compiled.phase4.iter())
+    {
         let (reason, rules) = classify_group(group);
         breakdown.add(reason, rules);
     }

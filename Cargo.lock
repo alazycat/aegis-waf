@@ -7,6 +7,7 @@ name = "aegis-engine"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
+ "barbacane-libinjection",
  "base64",
  "criterion",
  "form_urlencoded",
@@ -17,6 +18,7 @@ dependencies = [
  "proptest",
  "regex",
  "regex-syntax",
+ "roxmltree",
  "serde",
  "serde_json",
  "tempfile",
@@ -105,6 +107,17 @@ name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+
+[[package]]
+name = "barbacane-libinjection"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "836db2b79f5f4133d5e64aa99254833016ea0e8b74b306bee79db3c9716c8fba"
+dependencies = [
+ "bitflags",
+ "serde_json",
+ "smallvec",
+]
 
 [[package]]
 name = "base64"
@@ -950,6 +963,12 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rustix"

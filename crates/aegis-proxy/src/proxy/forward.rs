@@ -3,12 +3,12 @@ use std::net::IpAddr;
 use bytes::Bytes;
 use http::request::Parts;
 use http::{HeaderName, HeaderValue, Uri, Version};
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
+use hyper::body::Incoming;
 use hyper::header::HOST;
-use hyper::{Request, Response};
+use hyper::Request;
 
 use crate::config::HostHeader;
-use crate::proxy::ProxyBody;
 use crate::state::AppState;
 
 const HOP_BY_HOP: &[&str] = &[
@@ -33,7 +33,7 @@ pub async fn forward(
     parts: &Parts,
     body: Bytes,
     peer_ip: IpAddr,
-) -> Result<Response<ProxyBody>, ForwardError> {
+) -> Result<(http::response::Parts, Incoming), ForwardError> {
     let base: Uri = state
         .config
         .upstream
@@ -108,11 +108,5 @@ pub async fn forward(
     for name in HOP_BY_HOP {
         response_parts.headers.remove(*name);
     }
-    let mut response = Response::builder()
-        .status(response_parts.status)
-        .version(Version::HTTP_11)
-        .body(response_body.boxed())
-        .map_err(|error| ForwardError::Upstream(error.to_string()))?;
-    *response.headers_mut() = response_parts.headers;
-    Ok(response)
+    Ok((response_parts, response_body))
 }

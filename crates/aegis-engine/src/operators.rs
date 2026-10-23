@@ -16,6 +16,10 @@ pub enum CompiledOperator {
     Ge(i64),
     Lt(i64),
     Le(i64),
+    DetectSqli,
+    DetectXss,
+    Unconditional,
+    ByteRange(Vec<(u8, u8)>),
 }
 
 impl CompiledOperator {
@@ -44,6 +48,14 @@ impl CompiledOperator {
             Self::Le(value) => parse_number(input)
                 .map(|number| number <= *value)
                 .unwrap_or(false),
+            Self::DetectSqli => libinjectionrs::detect_sqli(input.as_bytes()).is_injection(),
+            Self::DetectXss => libinjectionrs::detect_xss(input.as_bytes()).is_injection(),
+            Self::Unconditional => true,
+            Self::ByteRange(ranges) => input.as_bytes().iter().all(|byte| {
+                ranges
+                    .iter()
+                    .any(|(start, end)| *start <= *byte && *byte <= *end)
+            }),
         }
     }
 }
@@ -95,5 +107,22 @@ mod tests {
     fn numeric_operators_handle_invalid_input() {
         assert!(CompiledOperator::Gt(5).matches("6"));
         assert!(!CompiledOperator::Gt(5).matches("abc"));
+    }
+
+    #[test]
+    fn libinjection_operators_detect_attacks() {
+        assert!(CompiledOperator::DetectSqli.matches("1' OR '1'='1"));
+        assert!(!CompiledOperator::DetectSqli.matches("hello world"));
+        assert!(CompiledOperator::DetectXss.matches("<script>alert(1)</script>"));
+        assert!(!CompiledOperator::DetectXss.matches("hello world"));
+    }
+
+    #[test]
+    fn byte_range_and_unconditional_operators() {
+        let printable = CompiledOperator::ByteRange(vec![(32, 126)]);
+        assert!(printable.matches("hello"));
+        assert!(!printable.matches("hel\0lo"));
+        assert!(CompiledOperator::Unconditional.matches(""));
+        assert!(CompiledOperator::Unconditional.matches("anything"));
     }
 }

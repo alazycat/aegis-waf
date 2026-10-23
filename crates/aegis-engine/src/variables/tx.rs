@@ -38,9 +38,13 @@ pub fn expand_macros(template: &str, tx: &TxStore) -> String {
         output.push_str(&rest[..start]);
         let after = &rest[start + 2..];
         if let Some(end) = after.find('}') {
-            let name = after[..end].trim();
+            let name = after[..end].trim().to_ascii_lowercase();
             if let Some(tx_name) = name.strip_prefix("tx.") {
                 if let Some(value) = tx.get(tx_name) {
+                    output.push_str(value);
+                }
+            } else if name == "matched_var" || name == "matched_var_name" {
+                if let Some(value) = tx.get(&name) {
                     output.push_str(value);
                 }
             }

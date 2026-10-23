@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use crate::error::EngineError;
 use crate::model::{
-    CompiledRule, CompiledRules, Disruptive, Phase, Prefilter, PrefilterHits, PrefilterVariant,
-    RuleGroup, SetVar, SetVarOp,
+    CompiledOperator, CompiledRule, CompiledRules, CtlAction, Disruptive, Phase, Prefilter,
+    PrefilterHits, PrefilterVariant, RuleEngineMode, RuleGroup, SetVar, SetVarOp,
 };
 use crate::variables::request::{RequestContext, RequestView};
 use crate::variables::tx::expand_macros;
@@ -45,6 +45,7 @@ pub struct Evaluation {
     pub matched: Vec<RuleMatch>,
     pub error: Option<EngineError>,
     pub latency: Duration,
+    pub suppress_audit: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +53,10 @@ pub struct EvaluationState {
     context: RequestContext,
     decision: Decision,
     matched: Vec<RuleMatch>,
+    audit_enabled: bool,
+    enforce: bool,
+    removed_rule_ids: HashSet<u32>,
+    removed_tags: HashSet<String>,
 }
 
 impl EvaluationState {
@@ -60,11 +65,23 @@ impl EvaluationState {
             context: RequestContext::new(view),
             decision: Decision::Pass,
             matched: Vec::new(),
+            audit_enabled: true,
+            enforce: true,
+            removed_rule_ids: HashSet::new(),
+            removed_tags: HashSet::new(),
         }
     }
 
     pub fn set_body(&mut self, body: &[u8]) {
         self.context.set_body(body);
+    }
+
+    pub fn set_response_headers(&mut self, status: u16, headers: &http::HeaderMap) {
+        self.context.set_response_headers(status, headers);
+    }
+
+    pub fn set_response_body(&mut self, body: &[u8]) {
+        self.context.set_response_body(body);
     }
 
     pub fn decision(&self) -> &Decision {
@@ -82,6 +99,8 @@ impl EvaluationState {
         let groups = match phase {
             Phase::Phase1 => &rules.phase1,
             Phase::Phase2 => &rules.phase2,
+            Phase::Phase3 => &rules.phase3,
+            Phase::Phase4 => &rules.phase4,
         };
         let prefilter_hits = rules
             .prefilter
@@ -90,6 +109,16 @@ impl EvaluationState {
         for group in groups {
             if self.decision.is_decisive() {
                 break;
+            }
+            let first = first_rule(group);
+            if self.removed_rule_ids.contains(&first.id)
+                || first
+                    .actions
+                    .tags
+                    .iter()
+                    .any(|tag| self.removed_tags.contains(tag))
+            {
+                continue;
             }
             if let Some(hits) = &prefilter_hits {
                 let first = first_rule(group);
@@ -112,18 +141,21 @@ impl EvaluationState {
             }
             match group {
                 RuleGroup::Single(rule) => {
-                    if self.rule_matches(rule) {
+                    if let Some(hit) = self.rule_matches(rule) {
+                        self.apply_hit_context(rule, &hit);
                         self.apply_actions(rule);
                     }
                 }
                 RuleGroup::Chain(chain) => {
                     let mut all_match = true;
                     for rule in chain {
-                        if !self.rule_matches(rule) {
+                        if let Some(hit) = self.rule_matches(rule) {
+                            self.apply_hit_context(rule, &hit);
+                            self.apply_non_disruptive(rule);
+                        } else {
                             all_match = false;
                             break;
                         }
-                        self.apply_non_disruptive(rule);
                     }
                     if all_match {
                         for rule in chain {
@@ -144,12 +176,17 @@ impl EvaluationState {
             matched: self.matched,
             error: None,
             latency: started.elapsed(),
+            suppress_audit: !self.audit_enabled,
         }
     }
 
-    fn rule_matches(&self, rule: &CompiledRule) -> bool {
+    fn rule_matches(&self, rule: &CompiledRule) -> Option<RuleHit> {
         if rule.unconditional {
-            return true;
+            return Some(RuleHit {
+                value: String::new(),
+                variable_name: String::new(),
+                captures: Vec::new(),
+            });
         }
         let excluded_arcs: Vec<Arc<Vec<String>>> = rule
             .variables
@@ -168,7 +205,9 @@ impl EvaluationState {
                 if excluded.contains(value.as_str()) {
                     continue;
                 }
+                let matched_value;
                 let matched = if rule.transformations.is_empty() {
+                    matched_value = value.clone();
                     rule.operator.matches(value)
                 } else {
                     let mut current = value.clone();
@@ -179,6 +218,7 @@ impl EvaluationState {
                         next.push_str(&result);
                         std::mem::swap(&mut current, &mut next);
                     }
+                    matched_value = current.clone();
                     rule.operator.matches(&current)
                 };
                 let matched = if rule.operator_negated {
@@ -187,11 +227,37 @@ impl EvaluationState {
                     matched
                 };
                 if matched {
-                    return true;
+                    let captures = if rule.actions.capture {
+                        capture_values(&rule.operator, &matched_value, rule.operator_negated)
+                    } else {
+                        Vec::new()
+                    };
+                    return Some(RuleHit {
+                        value: matched_value,
+                        variable_name: spec.variable.display_name(),
+                        captures,
+                    });
                 }
             }
         }
-        false
+        None
+    }
+
+    fn apply_hit_context(&mut self, rule: &CompiledRule, hit: &RuleHit) {
+        self.context.tx_mut().set("matched_var", hit.value.clone());
+        self.context
+            .tx_mut()
+            .set("matched_var_name", hit.variable_name.clone());
+        if rule.actions.capture {
+            for index in 0..10 {
+                let name = index.to_string();
+                if let Some(value) = hit.captures.get(index) {
+                    self.context.tx_mut().set(&name, value.clone());
+                } else {
+                    self.context.tx_mut().remove(&name);
+                }
+            }
+        }
     }
 
     fn apply_actions(&mut self, rule: &CompiledRule) {
@@ -202,6 +268,9 @@ impl EvaluationState {
     fn apply_non_disruptive(&mut self, rule: &CompiledRule) {
         for setvar in &rule.actions.setvars {
             self.apply_setvar(setvar);
+        }
+        for ctl in &rule.actions.ctl {
+            self.apply_ctl(ctl);
         }
         let msg = rule
             .actions
@@ -223,7 +292,25 @@ impl EvaluationState {
         });
     }
 
+    fn apply_ctl(&mut self, ctl: &CtlAction) {
+        match ctl {
+            CtlAction::AuditEngine(enabled) => self.audit_enabled = *enabled,
+            CtlAction::RuleEngine(mode) => {
+                self.enforce = matches!(mode, RuleEngineMode::On);
+            }
+            CtlAction::RemoveRuleById(id) => {
+                self.removed_rule_ids.insert(*id);
+            }
+            CtlAction::RemoveRuleByTag(tag) => {
+                self.removed_tags.insert(tag.clone());
+            }
+        }
+    }
+
     fn apply_disruptive(&mut self, rule: &CompiledRule) {
+        if !self.enforce {
+            return;
+        }
         match &rule.actions.disruptive {
             Some(Disruptive::Deny { status }) => {
                 let msg = rule
@@ -286,6 +373,32 @@ fn macro_integer(template: &str, context: &RequestContext) -> i64 {
         .trim()
         .parse::<i64>()
         .unwrap_or(0)
+}
+
+struct RuleHit {
+    value: String,
+    variable_name: String,
+    captures: Vec<String>,
+}
+
+fn capture_values(operator: &CompiledOperator, value: &str, operator_negated: bool) -> Vec<String> {
+    if operator_negated {
+        return vec![value.to_string()];
+    }
+    match operator {
+        CompiledOperator::Rx(regex) => match regex.captures(value) {
+            Some(captures) => (0..captures.len())
+                .map(|index| {
+                    captures
+                        .get(index)
+                        .map(|matched| matched.as_str().to_string())
+                        .unwrap_or_default()
+                })
+                .collect(),
+            None => vec![value.to_string()],
+        },
+        _ => vec![value.to_string()],
+    }
 }
 
 fn first_rule(group: &RuleGroup) -> &CompiledRule {
@@ -421,6 +534,7 @@ mod tests {
             uri,
             path,
             query,
+            protocol: "HTTP/1.1",
             headers: &headers,
             body,
             remote_addr: "127.0.0.1".parse().unwrap(),
@@ -775,6 +889,171 @@ SecRule REQUEST_METHOD "@eq GET" "id:9003,phase:1,pass"
         assert!(matches!(
             blocked.decision,
             Decision::Block { rule_id: 9105, .. }
+        ));
+    }
+
+    #[test]
+    fn capture_exposes_regex_groups_to_later_rules() {
+        let rules = load(
+            r#"
+SecRule ARGS "@rx secret-([0-9]+)" "id:9201,phase:1,pass,capture"
+SecRule TX:1 "@eq 42" "id:9202,phase:1,deny,status:403"
+"#,
+        );
+        let evaluation = eval(&rules, "GET", "/?q=secret-42", &[], b"");
+        assert!(matches!(
+            evaluation.decision,
+            Decision::Block { rule_id: 9202, .. }
+        ));
+    }
+
+    #[test]
+    fn matched_var_and_macro_are_available_to_later_rules() {
+        let rules = load(
+            r#"
+SecRule ARGS "@rx secret-([0-9]+)" "id:9203,phase:1,pass,capture"
+SecRule MATCHED_VAR "@contains secret-42" "id:9204,phase:1,deny,status:403,msg:'matched=%{MATCHED_VAR}'"
+"#,
+        );
+        let evaluation = eval(&rules, "GET", "/?q=secret-42", &[], b"");
+        assert_eq!(
+            evaluation.decision,
+            Decision::Block {
+                status: 403,
+                rule_id: 9204,
+                msg: Some("matched=secret-42".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn xml_variable_extracts_element_text() {
+        let rules = load(r#"SecRule XML:/* "@contains attack" "id:9205,phase:2,deny""#);
+        let headers = headers(&[("content-type", "application/xml")]);
+        let view = RequestView {
+            method: "POST",
+            uri: "/xml",
+            path: "/xml",
+            query: None,
+            protocol: "HTTP/1.1",
+            headers: &headers,
+            body: b"<root><a>attack</a></root>",
+            remote_addr: "127.0.0.1".parse().unwrap(),
+        };
+        let evaluation = evaluate(&rules, &view);
+        assert!(matches!(
+            evaluation.decision,
+            Decision::Block { rule_id: 9205, .. }
+        ));
+    }
+
+    #[test]
+    fn ctl_removes_rule_by_id() {
+        let rules = load(
+            r#"
+SecRule REQUEST_HEADERS:X-Skip "@eq 1" "id:1,phase:1,pass,ctl:ruleRemoveById=3"
+SecRule ARGS "@contains attack" "id:3,phase:1,deny,status:403"
+"#,
+        );
+        let skipped = eval(&rules, "GET", "/?q=attack", &[("x-skip", "1")], b"");
+        assert_eq!(skipped.decision, Decision::Pass);
+        let blocked = eval(&rules, "GET", "/?q=attack", &[], b"");
+        assert!(matches!(
+            blocked.decision,
+            Decision::Block { rule_id: 3, .. }
+        ));
+    }
+
+    #[test]
+    fn ctl_removes_rule_by_tag() {
+        let rules = load(
+            r#"
+SecRule REQUEST_HEADERS:X-Skip "@eq 1" "id:1,phase:1,pass,ctl:ruleRemoveByTag=blockme"
+SecRule ARGS "@contains attack" "id:3,phase:1,deny,status:403,tag:'blockme'"
+"#,
+        );
+        let skipped = eval(&rules, "GET", "/?q=attack", &[("x-skip", "1")], b"");
+        assert_eq!(skipped.decision, Decision::Pass);
+    }
+
+    #[test]
+    fn ctl_rule_engine_off_prevents_blocking() {
+        let rules = load(
+            r#"
+SecRule REQUEST_HEADERS:X-Skip "@eq 1" "id:1,phase:1,pass,ctl:ruleEngine=Off"
+SecRule ARGS "@contains attack" "id:3,phase:1,deny,status:403"
+"#,
+        );
+        let evaluation = eval(&rules, "GET", "/?q=attack", &[("x-skip", "1")], b"");
+        assert_eq!(evaluation.decision, Decision::Pass);
+    }
+
+    #[test]
+    fn ctl_audit_engine_off_suppresses_audit() {
+        let rules = load(r#"SecRule ARGS "@contains x" "id:1,phase:1,pass,ctl:auditEngine=Off""#);
+        let evaluation = eval(&rules, "GET", "/?q=x", &[], b"");
+        assert!(evaluation.suppress_audit);
+    }
+
+    #[test]
+    fn phase_three_blocks_on_response_status() {
+        let rules = load(r#"SecRule RESPONSE_STATUS "@eq 500" "id:9301,phase:3,deny,status:502""#);
+        let request_headers = headers(&[]);
+        let view = RequestView {
+            method: "GET",
+            uri: "/",
+            path: "/",
+            query: None,
+            protocol: "HTTP/1.1",
+            headers: &request_headers,
+            body: b"",
+            remote_addr: "127.0.0.1".parse().unwrap(),
+        };
+        let mut state = EvaluationState::new(&view);
+        state.evaluate_phase(&rules, Phase::Phase1);
+        state.evaluate_phase(&rules, Phase::Phase2);
+        assert_eq!(state.decision(), &Decision::Pass);
+        let response_headers = headers(&[("content-type", "text/html")]);
+        state.set_response_headers(500, &response_headers);
+        state.evaluate_phase(&rules, Phase::Phase3);
+        assert!(matches!(
+            state.decision(),
+            Decision::Block {
+                status: 502,
+                rule_id: 9301,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn phase_four_blocks_on_response_body() {
+        let rules =
+            load(r#"SecRule RESPONSE_BODY "@contains secret" "id:9302,phase:4,deny,status:403""#);
+        let request_headers = headers(&[]);
+        let view = RequestView {
+            method: "GET",
+            uri: "/",
+            path: "/",
+            query: None,
+            protocol: "HTTP/1.1",
+            headers: &request_headers,
+            body: b"",
+            remote_addr: "127.0.0.1".parse().unwrap(),
+        };
+        let mut state = EvaluationState::new(&view);
+        let response_headers = headers(&[("content-type", "text/plain")]);
+        state.set_response_headers(200, &response_headers);
+        state.evaluate_phase(&rules, Phase::Phase3);
+        state.set_response_body(b"a secret value");
+        state.evaluate_phase(&rules, Phase::Phase4);
+        assert!(matches!(
+            state.decision(),
+            Decision::Block {
+                status: 403,
+                rule_id: 9302,
+                ..
+            }
         ));
     }
 

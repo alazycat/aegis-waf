@@ -52,6 +52,8 @@ struct ParsedActions {
     setvars: Vec<SetVar>,
     logdata: Option<String>,
     chain: bool,
+    capture: bool,
+    ctl: Vec<CtlAction>,
 }
 
 impl ParsedActions {
@@ -78,6 +80,22 @@ fn compile_error(file: &Path, line: usize, column: usize, message: String) -> Lo
         line,
         column,
         message,
+    }
+}
+
+fn push_group(
+    phase: Phase,
+    group: RuleGroup,
+    phase1: &mut Vec<RuleGroup>,
+    phase2: &mut Vec<RuleGroup>,
+    phase3: &mut Vec<RuleGroup>,
+    phase4: &mut Vec<RuleGroup>,
+) {
+    match phase {
+        Phase::Phase1 => phase1.push(group),
+        Phase::Phase2 => phase2.push(group),
+        Phase::Phase3 => phase3.push(group),
+        Phase::Phase4 => phase4.push(group),
     }
 }
 
@@ -109,6 +127,8 @@ fn compile_directives(
     let mut ids = HashSet::new();
     let mut phase1 = Vec::new();
     let mut phase2 = Vec::new();
+    let mut phase3 = Vec::new();
+    let mut phase4 = Vec::new();
     let mut chain: Vec<CompiledRule> = Vec::new();
     let mut chain_phase: Option<Phase> = None;
     let mut skipping_chain = false;
@@ -175,16 +195,26 @@ fn compile_directives(
                 if !chain.is_empty() {
                     chain.push(rule);
                     let group = RuleGroup::Chain(std::mem::take(&mut chain));
-                    match chain_phase.take().unwrap_or(Phase::Phase2) {
-                        Phase::Phase1 => phase1.push(group),
-                        Phase::Phase2 => phase2.push(group),
-                    }
+                    let phase = chain_phase.take().unwrap_or(Phase::Phase2);
+                    push_group(
+                        phase,
+                        group,
+                        &mut phase1,
+                        &mut phase2,
+                        &mut phase3,
+                        &mut phase4,
+                    );
                     continue;
                 }
-                match rule.phase {
-                    Phase::Phase1 => phase1.push(RuleGroup::Single(Box::new(rule))),
-                    Phase::Phase2 => phase2.push(RuleGroup::Single(Box::new(rule))),
-                }
+                let phase = rule.phase;
+                push_group(
+                    phase,
+                    RuleGroup::Single(Box::new(rule)),
+                    &mut phase1,
+                    &mut phase2,
+                    &mut phase3,
+                    &mut phase4,
+                );
             }
             Directive::Action(ast) => {
                 skipping_chain = false;
@@ -209,10 +239,15 @@ fn compile_directives(
                     ));
                 }
                 rule_count += 1;
-                match rule.phase {
-                    Phase::Phase1 => phase1.push(RuleGroup::Single(Box::new(rule))),
-                    Phase::Phase2 => phase2.push(RuleGroup::Single(Box::new(rule))),
-                }
+                let phase = rule.phase;
+                push_group(
+                    phase,
+                    RuleGroup::Single(Box::new(rule)),
+                    &mut phase1,
+                    &mut phase2,
+                    &mut phase3,
+                    &mut phase4,
+                );
             }
             Directive::DefaultAction(ast) => {
                 skipping_chain = false;
@@ -235,6 +270,8 @@ fn compile_directives(
                     || !parsed.setvars.is_empty()
                     || parsed.logdata.is_some()
                     || parsed.chain
+                    || parsed.capture
+                    || !parsed.ctl.is_empty()
                     || parsed.block_requested
                 {
                     return Err(compile_error(
@@ -293,7 +330,7 @@ fn compile_directives(
         }
     }
 
-    let prefilter = build_prefilter(&mut phase1, &mut phase2)?;
+    let prefilter = build_prefilter(&mut phase1, &mut phase2, &mut phase3, &mut phase4)?;
 
     Ok(CompiledRules {
         version: options.version,
@@ -301,6 +338,8 @@ fn compile_directives(
         files,
         phase1,
         phase2,
+        phase3,
+        phase4,
         prefilter,
     })
 }
@@ -342,11 +381,11 @@ fn compile_rule(
             "rule id is required".to_string(),
         ));
     };
-    let phase = match parsed.phase.or(fallback_phase).or(defaults.phase) {
-        Some(Phase::Phase1) => Phase::Phase1,
-        Some(Phase::Phase2) => Phase::Phase2,
-        None => Phase::Phase2,
-    };
+    let phase = parsed
+        .phase
+        .or(fallback_phase)
+        .or(defaults.phase)
+        .unwrap_or(Phase::Phase2);
     let disruptive = resolve_disruptive(&parsed, defaults);
     let log = parsed.log.or(defaults.log).unwrap_or(false);
     let mut transformations = defaults.transforms.clone();
@@ -368,6 +407,8 @@ fn compile_rule(
             setvars: parsed.setvars,
             logdata: parsed.logdata,
             chain: parsed.chain,
+            capture: parsed.capture,
+            ctl: parsed.ctl,
         },
         unconditional: false,
         prefilter: None,
@@ -423,6 +464,8 @@ fn compile_action(
             setvars: parsed.setvars,
             logdata: parsed.logdata,
             chain: false,
+            capture: parsed.capture,
+            ctl: parsed.ctl,
         },
         unconditional: true,
         prefilter: None,
@@ -460,30 +503,34 @@ fn first_rule_mut(group: &mut RuleGroup) -> &mut CompiledRule {
 fn variable_prefilter_scope(variable: &Variable) -> Option<PrefilterScope> {
     match variable {
         Variable::RequestUri
+        | Variable::RequestUriRaw
+        | Variable::RequestLine
+        | Variable::RequestProtocol
+        | Variable::RequestBasename
         | Variable::RequestMethod
         | Variable::QueryString
         | Variable::RequestFilename => Some(PrefilterScope {
             request_line: true,
             ..Default::default()
         }),
-        Variable::RequestHeaders(_) => Some(PrefilterScope {
+        Variable::RequestHeaders(_) | Variable::RequestHeadersNames => Some(PrefilterScope {
             headers: true,
             ..Default::default()
         }),
-        Variable::Args | Variable::ArgsNames => Some(PrefilterScope {
+        Variable::Args(_) | Variable::ArgsNames => Some(PrefilterScope {
             query: true,
             body: true,
             ..Default::default()
         }),
-        Variable::ArgsGet => Some(PrefilterScope {
+        Variable::ArgsGet(_) => Some(PrefilterScope {
             query: true,
             ..Default::default()
         }),
-        Variable::ArgsPost => Some(PrefilterScope {
+        Variable::ArgsPost(_) => Some(PrefilterScope {
             body: true,
             ..Default::default()
         }),
-        Variable::RequestCookies(_) => Some(PrefilterScope {
+        Variable::RequestCookies(_) | Variable::RequestCookiesNames => Some(PrefilterScope {
             cookies: true,
             ..Default::default()
         }),
@@ -491,7 +538,18 @@ fn variable_prefilter_scope(variable: &Variable) -> Option<PrefilterScope> {
             body: true,
             ..Default::default()
         }),
-        Variable::RemoteAddr | Variable::Tx(_) => None,
+        Variable::RequestBodyLength
+        | Variable::RemoteAddr
+        | Variable::MatchedVar
+        | Variable::MatchedVarName
+        | Variable::Xml(_)
+        | Variable::ResponseStatus
+        | Variable::ResponseHeaders(_)
+        | Variable::ResponseHeadersNames
+        | Variable::ResponseBody
+        | Variable::ResponseBodyLength
+        | Variable::ResponseContentType
+        | Variable::Tx(_) => None,
     }
 }
 
@@ -589,11 +647,18 @@ struct VariantBuilder {
 fn build_prefilter(
     phase1: &mut [RuleGroup],
     phase2: &mut [RuleGroup],
+    phase3: &mut [RuleGroup],
+    phase4: &mut [RuleGroup],
 ) -> Result<Option<Prefilter>, LoadError> {
     let mut builders: Vec<VariantBuilder> = Vec::new();
     let mut variant_ids: HashMap<Vec<Transform>, usize> = HashMap::new();
 
-    for group in phase1.iter_mut().chain(phase2.iter_mut()) {
+    for group in phase1
+        .iter_mut()
+        .chain(phase2.iter_mut())
+        .chain(phase3.iter_mut())
+        .chain(phase4.iter_mut())
+    {
         let first = first_rule_mut(group);
         let Some((spec, group_scope)) = prefilter_spec(first) else {
             continue;
@@ -669,7 +734,12 @@ fn build_prefilter(
         .iter()
         .map(|builder| builder.regex_patterns.len() >= MIN_REGEX_SET_PATTERNS)
         .collect();
-    for group in phase1.iter_mut().chain(phase2.iter_mut()) {
+    for group in phase1
+        .iter_mut()
+        .chain(phase2.iter_mut())
+        .chain(phase3.iter_mut())
+        .chain(phase4.iter_mut())
+    {
         let first = first_rule_mut(group);
         let disable = first
             .prefilter
@@ -768,13 +838,29 @@ fn parse_variables(
             "QUERY_STRING" if selector.is_none() => Variable::QueryString,
             "REQUEST_FILENAME" if selector.is_none() => Variable::RequestFilename,
             "REQUEST_HEADERS" => Variable::RequestHeaders(selector),
-            "ARGS" if selector.is_none() => Variable::Args,
-            "ARGS_GET" if selector.is_none() => Variable::ArgsGet,
-            "ARGS_POST" if selector.is_none() => Variable::ArgsPost,
+            "REQUEST_HEADERS_NAMES" if selector.is_none() => Variable::RequestHeadersNames,
+            "ARGS" => Variable::Args(selector),
+            "ARGS_GET" => Variable::ArgsGet(selector),
+            "ARGS_POST" => Variable::ArgsPost(selector),
             "ARGS_NAMES" if selector.is_none() => Variable::ArgsNames,
             "REQUEST_COOKIES" => Variable::RequestCookies(selector),
+            "REQUEST_COOKIES_NAMES" if selector.is_none() => Variable::RequestCookiesNames,
             "REQUEST_BODY" if selector.is_none() => Variable::RequestBody,
+            "REQUEST_BODY_LENGTH" if selector.is_none() => Variable::RequestBodyLength,
             "REMOTE_ADDR" if selector.is_none() => Variable::RemoteAddr,
+            "REQUEST_URI_RAW" if selector.is_none() => Variable::RequestUriRaw,
+            "REQUEST_LINE" if selector.is_none() => Variable::RequestLine,
+            "REQUEST_PROTOCOL" if selector.is_none() => Variable::RequestProtocol,
+            "REQUEST_BASENAME" if selector.is_none() => Variable::RequestBasename,
+            "MATCHED_VAR" if selector.is_none() => Variable::MatchedVar,
+            "MATCHED_VAR_NAME" if selector.is_none() => Variable::MatchedVarName,
+            "XML" => Variable::Xml(selector),
+            "RESPONSE_STATUS" if selector.is_none() => Variable::ResponseStatus,
+            "RESPONSE_HEADERS" => Variable::ResponseHeaders(selector),
+            "RESPONSE_HEADERS_NAMES" if selector.is_none() => Variable::ResponseHeadersNames,
+            "RESPONSE_BODY" if selector.is_none() => Variable::ResponseBody,
+            "RESPONSE_BODY_LENGTH" if selector.is_none() => Variable::ResponseBodyLength,
+            "RESPONSE_CONTENT_TYPE" if selector.is_none() => Variable::ResponseContentType,
             "TX" => Variable::Tx(selector.map(|value| value.to_ascii_lowercase())),
             _ => {
                 if options.lenient {
@@ -838,6 +924,26 @@ fn parse_operator(raw: &str) -> Result<(CompiledOperator, bool), String> {
         "ge" => CompiledOperator::Ge(parse_integer(&argument)?),
         "lt" => CompiledOperator::Lt(parse_integer(&argument)?),
         "le" => CompiledOperator::Le(parse_integer(&argument)?),
+        "detectsqli" => {
+            if !argument.is_empty() {
+                return Err("@detectSQLi does not accept an argument".to_string());
+            }
+            CompiledOperator::DetectSqli
+        }
+        "detectxss" => {
+            if !argument.is_empty() {
+                return Err("@detectXSS does not accept an argument".to_string());
+            }
+            CompiledOperator::DetectXss
+        }
+        "streq" => CompiledOperator::Eq(argument),
+        "unconditionalmatch" => {
+            if !argument.is_empty() {
+                return Err("@unconditionalMatch does not accept an argument".to_string());
+            }
+            CompiledOperator::Unconditional
+        }
+        "validatebyterange" => CompiledOperator::ByteRange(parse_byte_ranges(&argument)?),
         other => return Err(format!("unsupported operator @{other}")),
     };
     Ok((operator, negated))
@@ -847,6 +953,33 @@ fn parse_integer(raw: &str) -> Result<i64, String> {
     raw.trim()
         .parse::<i64>()
         .map_err(|error| format!("invalid integer {raw}: {error}"))
+}
+
+fn parse_byte_ranges(raw: &str) -> Result<Vec<(u8, u8)>, String> {
+    raw.split(',')
+        .map(|item| {
+            let item = item.trim();
+            if let Some((start, end)) = item.split_once('-') {
+                let start = start
+                    .trim()
+                    .parse::<u8>()
+                    .map_err(|error| format!("invalid byte range {item}: {error}"))?;
+                let end = end
+                    .trim()
+                    .parse::<u8>()
+                    .map_err(|error| format!("invalid byte range {item}: {error}"))?;
+                if start > end {
+                    return Err(format!("invalid byte range {item}"));
+                }
+                Ok((start, end))
+            } else {
+                let value = item
+                    .parse::<u8>()
+                    .map_err(|error| format!("invalid byte range {item}: {error}"))?;
+                Ok((value, value))
+            }
+        })
+        .collect()
 }
 
 fn parse_actions(
@@ -882,7 +1015,9 @@ fn parse_actions(
                 let phase = match raw_phase {
                     "1" => Phase::Phase1,
                     "2" => Phase::Phase2,
-                    "3" | "4" | "5" => {
+                    "3" => Phase::Phase3,
+                    "4" => Phase::Phase4,
+                    "5" => {
                         if options.lenient {
                             tracing::warn!(
                                 file = %file.display(),
@@ -1087,6 +1222,36 @@ fn parse_actions(
                 }
                 parsed.chain = true;
             }
+            "capture" => {
+                if value.is_some() {
+                    return Err(compile_error(
+                        file,
+                        line,
+                        column,
+                        "capture does not accept a value".to_string(),
+                    ));
+                }
+                parsed.capture = true;
+            }
+            "ctl" => {
+                let raw_ctl = value.ok_or_else(|| {
+                    compile_error(file, line, column, "ctl requires a value".to_string())
+                })?;
+                match parse_ctl(raw_ctl) {
+                    Ok(action) => parsed.ctl.push(action),
+                    Err(message) => {
+                        if options.lenient {
+                            tracing::warn!(
+                                file = %file.display(),
+                                line,
+                                "ignoring ctl: {message}"
+                            );
+                        } else {
+                            return Err(compile_error(file, line, column, message));
+                        }
+                    }
+                }
+            }
             "setvar" => {
                 let raw_setvar = value.ok_or_else(|| {
                     compile_error(file, line, column, "setvar requires a value".to_string())
@@ -1125,6 +1290,33 @@ fn parse_actions(
         }
     }
     Ok(Some(parsed))
+}
+
+fn parse_ctl(raw: &str) -> Result<CtlAction, String> {
+    let (key, value) = raw
+        .split_once('=')
+        .ok_or_else(|| "ctl requires key=value".to_string())?;
+    let key = key.trim().to_ascii_lowercase();
+    let value = unquote(value.trim());
+    match key.as_str() {
+        "auditengine" => match value.to_ascii_lowercase().as_str() {
+            "off" => Ok(CtlAction::AuditEngine(false)),
+            "on" | "relevantonly" => Ok(CtlAction::AuditEngine(true)),
+            other => Err(format!("unsupported auditEngine value {other}")),
+        },
+        "ruleengine" => match value.to_ascii_lowercase().as_str() {
+            "on" => Ok(CtlAction::RuleEngine(RuleEngineMode::On)),
+            "off" => Ok(CtlAction::RuleEngine(RuleEngineMode::Off)),
+            "detectiononly" => Ok(CtlAction::RuleEngine(RuleEngineMode::DetectionOnly)),
+            other => Err(format!("unsupported ruleEngine value {other}")),
+        },
+        "ruleremovebyid" => value
+            .parse::<u32>()
+            .map(CtlAction::RemoveRuleById)
+            .map_err(|error| format!("invalid ruleRemoveById: {error}")),
+        "ruleremovebytag" => Ok(CtlAction::RemoveRuleByTag(value)),
+        other => Err(format!("unsupported ctl {other}")),
+    }
 }
 
 fn parse_setvar(raw: &str) -> Result<SetVar, String> {

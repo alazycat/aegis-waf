@@ -42,6 +42,7 @@ async fn start_admin(token: Option<&str>) -> AdminHarness {
             max_header_bytes: 65536,
             max_uri_bytes: 8192,
             max_body_bytes: 1048576,
+            max_response_body_bytes: 1048576,
             header_read_timeout_ms: 10000,
             body_read_timeout_ms: 15000,
         },

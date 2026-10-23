@@ -102,6 +102,7 @@ fn bench_evaluate(c: &mut Criterion) {
         query: Some("q=hello"),
         headers: &request_headers,
         body: b"",
+        protocol: "HTTP/1.1",
         remote_addr,
     };
     let blocked_xss = RequestView {
@@ -111,6 +112,7 @@ fn bench_evaluate(c: &mut Criterion) {
         query: Some("q=%3Cscript%3E"),
         headers: &request_headers,
         body: b"",
+        protocol: "HTTP/1.1",
         remote_addr,
     };
     let blocked_body = RequestView {
@@ -120,6 +122,7 @@ fn bench_evaluate(c: &mut Criterion) {
         query: None,
         headers: &body_headers,
         body: b"q=union+select",
+        protocol: "HTTP/1.1",
         remote_addr,
     };
     let match200_uri = "/search?q=needle-0199";
@@ -131,6 +134,7 @@ fn bench_evaluate(c: &mut Criterion) {
         query: Some(match200_query),
         headers: &request_headers,
         body: b"",
+        protocol: "HTTP/1.1",
         remote_addr,
     };
     let match500_uri = "/search?q=needle-0499";
@@ -142,6 +146,7 @@ fn bench_evaluate(c: &mut Criterion) {
         query: Some(match500_query),
         headers: &request_headers,
         body: b"",
+        protocol: "HTTP/1.1",
         remote_addr,
     };
     let match_regex200_uri = "/search?q=rxneedle-0199";
@@ -153,6 +158,7 @@ fn bench_evaluate(c: &mut Criterion) {
         query: Some(match_regex200_query),
         headers: &request_headers,
         body: b"",
+        protocol: "HTTP/1.1",
         remote_addr,
     };
     let match_regex500_uri = "/search?q=rxneedle-0499";
@@ -164,6 +170,7 @@ fn bench_evaluate(c: &mut Criterion) {
         query: Some(match_regex500_query),
         headers: &request_headers,
         body: b"",
+        protocol: "HTTP/1.1",
         remote_addr,
     };
     let match_icase200_uri = "/search?q=ICASE-0199";
@@ -175,6 +182,7 @@ fn bench_evaluate(c: &mut Criterion) {
         query: Some(match_icase200_query),
         headers: &request_headers,
         body: b"",
+        protocol: "HTTP/1.1",
         remote_addr,
     };
     let match_icase500_uri = "/search?q=ICASE-0499";
@@ -186,6 +194,7 @@ fn bench_evaluate(c: &mut Criterion) {
         query: Some(match_icase500_query),
         headers: &request_headers,
         body: b"",
+        protocol: "HTTP/1.1",
         remote_addr,
     };
 

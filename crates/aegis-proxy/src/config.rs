@@ -55,6 +55,8 @@ pub struct LimitsConfig {
     pub max_uri_bytes: usize,
     #[serde(default = "default_max_body_bytes")]
     pub max_body_bytes: usize,
+    #[serde(default = "default_max_response_body_bytes")]
+    pub max_response_body_bytes: usize,
     #[serde(default = "default_header_read_timeout_ms")]
     pub header_read_timeout_ms: u64,
     #[serde(default = "default_body_read_timeout_ms")]
@@ -126,6 +128,10 @@ fn default_max_uri_bytes() -> usize {
 }
 
 fn default_max_body_bytes() -> usize {
+    1048576
+}
+
+fn default_max_response_body_bytes() -> usize {
     1048576
 }
 
@@ -275,6 +281,10 @@ impl Config {
             ("limits.max_header_bytes", self.limits.max_header_bytes),
             ("limits.max_uri_bytes", self.limits.max_uri_bytes),
             ("limits.max_body_bytes", self.limits.max_body_bytes),
+            (
+                "limits.max_response_body_bytes",
+                self.limits.max_response_body_bytes,
+            ),
             (
                 "limits.header_read_timeout_ms",
                 self.limits.header_read_timeout_ms as usize,

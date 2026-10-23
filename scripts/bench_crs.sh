@@ -15,6 +15,6 @@ echo "CRS commit: $(git -C "$CRS_DIR" rev-parse --short HEAD)"
 FILES=("$CRS_DIR/crs-setup.conf.example")
 while IFS= read -r file; do
     FILES+=("$file")
-done < <(find "$CRS_DIR/rules" -maxdepth 1 -name "REQUEST-*.conf" | sort)
+done < <(find "$CRS_DIR/rules" -maxdepth 1 \( -name "REQUEST-*.conf" -o -name "RESPONSE-*.conf" \) | sort)
 
 cargo run --release -p aegis-engine --example prefilter_report -- "${FILES[@]}"

@@ -15,6 +15,7 @@ pub struct RequestView<'a> {
     pub uri: &'a str,
     pub path: &'a str,
     pub query: Option<&'a str>,
+    pub protocol: &'a str,
     pub headers: &'a HeaderMap,
     pub body: &'a [u8],
     pub remote_addr: IpAddr,
@@ -26,12 +27,20 @@ pub struct RequestContext {
     uri: String,
     path: String,
     query: Option<String>,
+    protocol: String,
     headers: Vec<(String, String)>,
     query_pairs: Vec<(String, String)>,
     body_pairs: Vec<(String, String)>,
     cookies: Vec<(String, String)>,
     remote_addr: IpAddr,
     body_text: String,
+    body_len: usize,
+    xml_values: Vec<String>,
+    response_status: Option<u16>,
+    response_headers: Vec<(String, String)>,
+    response_body_text: String,
+    response_body_len: usize,
+    response_content_type: Option<String>,
     tx: TxStore,
     cache: RefCell<HashMap<Variable, Arc<Vec<String>>>>,
 }
@@ -67,18 +76,27 @@ impl RequestContext {
             uri: view.uri.to_string(),
             path: view.path.to_string(),
             query: view.query.map(str::to_string),
+            protocol: view.protocol.to_string(),
             headers,
             query_pairs,
             body_pairs: Vec::new(),
             cookies,
             remote_addr: view.remote_addr,
             body_text: String::new(),
+            body_len: 0,
+            xml_values: Vec::new(),
+            response_status: None,
+            response_headers: Vec::new(),
+            response_body_text: String::new(),
+            response_body_len: 0,
+            response_content_type: None,
             tx: TxStore::default(),
             cache: RefCell::new(HashMap::new()),
         }
     }
 
     pub fn set_body(&mut self, body: &[u8]) {
+        self.body_len = body.len();
         self.body_text = String::from_utf8_lossy(body).into_owned();
         let is_form = self
             .headers
@@ -97,6 +115,41 @@ impl RequestContext {
         } else {
             Vec::new()
         };
+        self.xml_values = if self
+            .headers
+            .iter()
+            .find(|(name, _)| name == "content-type")
+            .map(|(_, value)| value.to_ascii_lowercase().contains("xml"))
+            .unwrap_or(false)
+        {
+            extract_xml_values(&self.body_text)
+        } else {
+            Vec::new()
+        };
+        self.cache.borrow_mut().clear();
+    }
+
+    pub fn set_response_headers(&mut self, status: u16, headers: &HeaderMap) {
+        self.response_status = Some(status);
+        self.response_headers = headers
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_ascii_lowercase(),
+                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                )
+            })
+            .collect();
+        self.response_content_type = headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        self.cache.borrow_mut().clear();
+    }
+
+    pub fn set_response_body(&mut self, body: &[u8]) {
+        self.response_body_len = body.len();
+        self.response_body_text = String::from_utf8_lossy(body).into_owned();
         self.cache.borrow_mut().clear();
     }
 
@@ -109,7 +162,10 @@ impl RequestContext {
     }
 
     pub fn extract(&self, variable: &Variable) -> Arc<Vec<String>> {
-        let cacheable = !matches!(variable, Variable::Tx(_));
+        let cacheable = !matches!(
+            variable,
+            Variable::Tx(_) | Variable::MatchedVar | Variable::MatchedVarName
+        );
         if cacheable {
             if let Some(values) = self.cache.borrow().get(variable) {
                 return values.clone();
@@ -126,7 +182,17 @@ impl RequestContext {
 
     fn compute(&self, variable: &Variable) -> Vec<String> {
         match variable {
-            Variable::RequestUri => vec![self.uri.clone()],
+            Variable::RequestUri | Variable::RequestUriRaw => vec![self.uri.clone()],
+            Variable::RequestLine => {
+                vec![format!("{} {} {}", self.method, self.uri, self.protocol)]
+            }
+            Variable::RequestProtocol => vec![self.protocol.clone()],
+            Variable::RequestBasename => vec![self
+                .path
+                .rsplit('/')
+                .find(|segment| !segment.is_empty())
+                .unwrap_or("")
+                .to_string()],
             Variable::RequestMethod => vec![self.method.clone()],
             Variable::QueryString => vec![self.query.clone().unwrap_or_default()],
             Variable::RequestFilename => vec![self.path.clone()],
@@ -143,20 +209,39 @@ impl RequestContext {
                     .map(|(_, value)| value.clone())
                     .collect()
             }
-            Variable::Args => self
+            Variable::RequestHeadersNames => unique_names(&self.headers),
+            Variable::Args(selector) => self
                 .query_pairs
                 .iter()
                 .chain(self.body_pairs.iter())
+                .filter(|(name, _)| {
+                    selector
+                        .as_ref()
+                        .map(|selector| name.eq_ignore_ascii_case(selector))
+                        .unwrap_or(true)
+                })
                 .map(|(_, value)| value.clone())
                 .collect(),
-            Variable::ArgsGet => self
+            Variable::ArgsGet(selector) => self
                 .query_pairs
                 .iter()
+                .filter(|(name, _)| {
+                    selector
+                        .as_ref()
+                        .map(|selector| name.eq_ignore_ascii_case(selector))
+                        .unwrap_or(true)
+                })
                 .map(|(_, value)| value.clone())
                 .collect(),
-            Variable::ArgsPost => self
+            Variable::ArgsPost(selector) => self
                 .body_pairs
                 .iter()
+                .filter(|(name, _)| {
+                    selector
+                        .as_ref()
+                        .map(|selector| name.eq_ignore_ascii_case(selector))
+                        .unwrap_or(true)
+                })
                 .map(|(_, value)| value.clone())
                 .collect(),
             Variable::ArgsNames => self
@@ -176,8 +261,46 @@ impl RequestContext {
                 .filter(|(cookie, _)| cookie.eq_ignore_ascii_case(name))
                 .map(|(_, value)| value.clone())
                 .collect(),
+            Variable::RequestCookiesNames => unique_names(&self.cookies),
             Variable::RequestBody => vec![self.body_text.clone()],
+            Variable::RequestBodyLength => vec![self.body_len.to_string()],
             Variable::RemoteAddr => vec![self.remote_addr.to_string()],
+            Variable::MatchedVar => self
+                .tx
+                .get("matched_var")
+                .map(|value| vec![value.to_string()])
+                .unwrap_or_default(),
+            Variable::MatchedVarName => self
+                .tx
+                .get("matched_var_name")
+                .map(|value| vec![value.to_string()])
+                .unwrap_or_default(),
+            Variable::Xml(_) => self.xml_values.clone(),
+            Variable::ResponseStatus => self
+                .response_status
+                .map(|status| vec![status.to_string()])
+                .unwrap_or_default(),
+            Variable::ResponseHeaders(None) => self
+                .response_headers
+                .iter()
+                .map(|(_, value)| value.clone())
+                .collect(),
+            Variable::ResponseHeaders(Some(name)) => {
+                let name = name.to_ascii_lowercase();
+                self.response_headers
+                    .iter()
+                    .filter(|(header, _)| *header == name)
+                    .map(|(_, value)| value.clone())
+                    .collect()
+            }
+            Variable::ResponseHeadersNames => unique_names(&self.response_headers),
+            Variable::ResponseBody => vec![self.response_body_text.clone()],
+            Variable::ResponseBodyLength => vec![self.response_body_len.to_string()],
+            Variable::ResponseContentType => self
+                .response_content_type
+                .clone()
+                .map(|value| vec![value])
+                .unwrap_or_default(),
             Variable::Tx(None) => self.tx.values().map(str::to_string).collect(),
             Variable::Tx(Some(name)) => self
                 .tx
@@ -192,6 +315,7 @@ impl RequestContext {
             f(&self.method);
             f(&self.uri);
             f(&self.path);
+            f(&self.protocol);
             if let Some(query) = &self.query {
                 f(query);
             }
@@ -235,6 +359,43 @@ fn parse_cookies(value: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+fn unique_names(pairs: &[(String, String)]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    pairs
+        .iter()
+        .filter_map(|(name, _)| {
+            if seen.insert(name.clone()) {
+                Some(name.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn extract_xml_values(text: &str) -> Vec<String> {
+    let Ok(document) = roxmltree::Document::parse(text) else {
+        return Vec::new();
+    };
+    let mut values = Vec::new();
+    for node in document.descendants() {
+        for child in node.children() {
+            if child.is_text() {
+                if let Some(text) = child.text() {
+                    let text = text.trim();
+                    if !text.is_empty() {
+                        values.push(text.to_string());
+                    }
+                }
+            }
+        }
+        for attribute in node.attributes() {
+            values.push(attribute.value().to_string());
+        }
+    }
+    values
+}
+
 #[cfg(test)]
 mod tests {
     use http::{HeaderMap, HeaderValue};
@@ -259,6 +420,7 @@ mod tests {
             uri: "/search?q=%3Cscript%3E&page=2",
             path: "/search",
             query: Some("q=%3Cscript%3E&page=2"),
+            protocol: "HTTP/1.1",
             headers,
             body: b"",
             remote_addr: "203.0.113.7".parse().unwrap(),
@@ -274,8 +436,14 @@ mod tests {
     fn extracts_query_arguments_and_names() {
         let headers = header_map(&[]);
         let context = context(&headers);
-        assert_eq!(extract(&context, Variable::ArgsGet), vec!["<script>", "2"]);
-        assert_eq!(extract(&context, Variable::Args), vec!["<script>", "2"]);
+        assert_eq!(
+            extract(&context, Variable::ArgsGet(None)),
+            vec!["<script>", "2"]
+        );
+        assert_eq!(
+            extract(&context, Variable::Args(None)),
+            vec!["<script>", "2"]
+        );
         let mut names = extract(&context, Variable::ArgsNames);
         names.sort();
         assert_eq!(names, vec!["page", "q"]);
@@ -286,9 +454,12 @@ mod tests {
         let headers = header_map(&[("content-type", "application/x-www-form-urlencoded")]);
         let mut context = context(&headers);
         context.set_body(b"user=admin&token=a%20b");
-        assert_eq!(extract(&context, Variable::ArgsPost), vec!["admin", "a b"]);
         assert_eq!(
-            extract(&context, Variable::Args),
+            extract(&context, Variable::ArgsPost(None)),
+            vec!["admin", "a b"]
+        );
+        assert_eq!(
+            extract(&context, Variable::Args(None)),
             vec!["<script>", "2", "admin", "a b"]
         );
     }
@@ -298,7 +469,7 @@ mod tests {
         let headers = header_map(&[("content-type", "multipart/form-data; boundary=x")]);
         let mut context = context(&headers);
         context.set_body(b"user=admin");
-        assert!(extract(&context, Variable::ArgsPost).is_empty());
+        assert!(extract(&context, Variable::ArgsPost(None)).is_empty());
         assert_eq!(extract(&context, Variable::RequestBody), vec!["user=admin"]);
     }
 
@@ -367,15 +538,99 @@ mod tests {
     }
 
     #[test]
+    fn extracts_extended_request_metadata() {
+        let headers = header_map(&[
+            ("x-a", "1"),
+            ("x-b", "2"),
+            ("cookie", "session=abc; theme=dark"),
+        ]);
+        let mut context = context(&headers);
+        assert_eq!(
+            extract(&context, Variable::RequestUriRaw),
+            vec!["/search?q=%3Cscript%3E&page=2"]
+        );
+        assert_eq!(
+            extract(&context, Variable::RequestLine),
+            vec!["POST /search?q=%3Cscript%3E&page=2 HTTP/1.1"]
+        );
+        assert_eq!(
+            extract(&context, Variable::RequestProtocol),
+            vec!["HTTP/1.1"]
+        );
+        assert_eq!(extract(&context, Variable::RequestBasename), vec!["search"]);
+        let header_names = extract(&context, Variable::RequestHeadersNames);
+        assert!(header_names.contains(&"x-a".to_string()));
+        assert!(header_names.contains(&"x-b".to_string()));
+        assert_eq!(
+            extract(&context, Variable::RequestCookiesNames),
+            vec!["session", "theme"]
+        );
+        assert_eq!(extract(&context, Variable::RequestBodyLength), vec!["0"]);
+        context.set_body(b"abc");
+        assert_eq!(extract(&context, Variable::RequestBodyLength), vec!["3"]);
+    }
+
+    #[test]
+    fn extracts_args_selectors() {
+        let headers = header_map(&[("content-type", "application/x-www-form-urlencoded")]);
+        let mut context = context(&headers);
+        context.set_body(b"q=body&x=1");
+        assert_eq!(
+            extract(&context, Variable::ArgsGet(Some("q".into()))),
+            vec!["<script>"]
+        );
+        assert_eq!(
+            extract(&context, Variable::ArgsPost(Some("x".into()))),
+            vec!["1"]
+        );
+        assert_eq!(
+            extract(&context, Variable::Args(Some("x".into()))),
+            vec!["1"]
+        );
+    }
+
+    #[test]
+    fn extracts_xml_values() {
+        let headers = header_map(&[("content-type", "application/xml")]);
+        let mut context = context(&headers);
+        context.set_body(b"<root><a>attack</a><b x=\"y\"/></root>");
+        let values = extract(&context, Variable::Xml(Some("/*".into())));
+        assert!(values.contains(&"attack".to_string()));
+        assert!(values.contains(&"y".to_string()));
+    }
+
+    #[test]
+    fn extracts_response_variables() {
+        let headers = header_map(&[("content-type", "text/html"), ("x-test", "one")]);
+        let mut context = context(&headers);
+        context.set_response_headers(404, &headers);
+        assert_eq!(extract(&context, Variable::ResponseStatus), vec!["404"]);
+        assert_eq!(
+            extract(&context, Variable::ResponseContentType),
+            vec!["text/html"]
+        );
+        assert_eq!(
+            extract(&context, Variable::ResponseHeaders(Some("X-Test".into()))),
+            vec!["one"]
+        );
+        let mut response_header_names = extract(&context, Variable::ResponseHeadersNames);
+        response_header_names.sort();
+        assert_eq!(response_header_names, vec!["content-type", "x-test"]);
+        context.set_response_body(b"not found");
+        assert_eq!(extract(&context, Variable::ResponseBody), vec!["not found"]);
+        assert_eq!(extract(&context, Variable::ResponseBodyLength), vec!["9"]);
+    }
+
+    #[test]
     fn caches_non_tx_extractions_and_clears_on_body_change() {
         let headers = header_map(&[]);
         let mut context = context(&headers);
-        let first = context.extract(&Variable::ArgsGet);
-        let second = context.extract(&Variable::ArgsGet);
+        let first = context.extract(&Variable::ArgsGet(None));
+        let second = context.extract(&Variable::ArgsGet(None));
         assert!(Arc::ptr_eq(&first, &second));
 
         context.set_body(b"q=body");
-        let after = context.extract(&Variable::ArgsGet);
+        let after = context.extract(&Variable::ArgsGet(None));
         assert!(!Arc::ptr_eq(&first, &after));
     }
 }

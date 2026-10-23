@@ -42,7 +42,7 @@ fn compiles_basic_rule_with_defaults() {
     };
     assert_eq!(rule.id, 1001);
     assert_eq!(rule.phase, Phase::Phase2);
-    assert!(matches!(rule.variables[0].variable, Variable::Args));
+    assert!(matches!(rule.variables[0].variable, Variable::Args(_)));
     assert!(matches!(rule.operator, CompiledOperator::Rx(_)));
     assert!(rule.actions.disruptive.is_some());
 }
@@ -79,14 +79,27 @@ SecRule ARGS "@rx b" "id:1,pass"
 
 #[test]
 fn rejects_unsupported_phase_in_strict_mode() {
-    let error = load(r#"SecRule ARGS "@rx a" "id:1,phase:3,deny""#).unwrap_err();
-    assert!(error.to_string().contains("phase 3"));
+    let error = load(r#"SecRule ARGS "@rx a" "id:1,phase:5,deny""#).unwrap_err();
+    assert!(error.to_string().contains("phase 5"));
 }
 
 #[test]
 fn skips_unsupported_phase_in_lenient_mode() {
-    let rules = load_lenient(r#"SecRule ARGS "@rx a" "id:1,phase:3,deny""#);
+    let rules = load_lenient(r#"SecRule ARGS "@rx a" "id:1,phase:5,deny""#);
     assert_eq!(rules.rule_count, 0);
+}
+
+#[test]
+fn compiles_response_phases() {
+    let rules = load(
+        r#"
+SecRule RESPONSE_STATUS "@eq 500" "id:1,phase:3,deny"
+SecRule RESPONSE_BODY "@contains secret" "id:2,phase:4,deny"
+"#,
+    )
+    .unwrap();
+    assert_eq!(rules.phase3.len(), 1);
+    assert_eq!(rules.phase4.len(), 1);
 }
 
 #[test]
