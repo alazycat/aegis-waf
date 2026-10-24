@@ -1470,6 +1470,32 @@ fn parse_actions(
     Ok(Some(parsed))
 }
 
+fn parse_rule_id_range(value: &str) -> Result<RuleIdRange, String> {
+    match value.split_once('-') {
+        Some((start, end)) => {
+            let start = start
+                .trim()
+                .parse::<u32>()
+                .map_err(|error| format!("invalid ruleRemoveById start: {error}"))?;
+            let end = end
+                .trim()
+                .parse::<u32>()
+                .map_err(|error| format!("invalid ruleRemoveById end: {error}"))?;
+            if start > end {
+                return Err(format!("invalid ruleRemoveById range {start}-{end}"));
+            }
+            Ok(RuleIdRange { start, end })
+        }
+        None => {
+            let id = value
+                .trim()
+                .parse::<u32>()
+                .map_err(|error| format!("invalid ruleRemoveById: {error}"))?;
+            Ok(RuleIdRange { start: id, end: id })
+        }
+    }
+}
+
 fn parse_ctl(
     raw: &str,
     file: &Path,
@@ -1494,10 +1520,7 @@ fn parse_ctl(
             "detectiononly" => Ok(CtlAction::RuleEngine(RuleEngineMode::DetectionOnly)),
             other => Err(format!("unsupported ruleEngine value {other}")),
         },
-        "ruleremovebyid" => value
-            .parse::<u32>()
-            .map(CtlAction::RemoveRuleById)
-            .map_err(|error| format!("invalid ruleRemoveById: {error}")),
+        "ruleremovebyid" => parse_rule_id_range(&value).map(CtlAction::RemoveRuleById),
         "ruleremovebytag" => Ok(CtlAction::RemoveRuleByTag(value)),
         "requestbodyprocessor" => BodyProcessor::parse_name(&value)
             .map(CtlAction::RequestBodyProcessor)

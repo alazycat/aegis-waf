@@ -5,8 +5,8 @@ use crate::collections::SharedCollectionStore;
 use crate::error::EngineError;
 use crate::model::{
     CompiledOperator, CompiledRule, CompiledRules, CtlAction, Disruptive, Phase, Prefilter,
-    PrefilterHits, PrefilterVariant, RuleEngineMode, RuleGroup, SetVar, SetVarOp, SetVarScope,
-    Variable, VariableSpec,
+    PrefilterHits, PrefilterVariant, RuleEngineMode, RuleGroup, RuleIdRange, SetVar, SetVarOp,
+    SetVarScope, Variable, VariableSpec,
 };
 use crate::variables::request::{RequestContext, RequestView, VariableEntry};
 use crate::variables::tx::expand_macros_with_remote;
@@ -56,7 +56,7 @@ pub struct EvaluationState {
     matched: Vec<RuleMatch>,
     audit_enabled: bool,
     enforce: bool,
-    removed_rule_ids: HashSet<u32>,
+    removed_rule_ids: Vec<RuleIdRange>,
     removed_tags: HashSet<String>,
     removed_targets_by_id: Vec<(u32, Variable)>,
     removed_targets_by_tag: Vec<(String, Variable)>,
@@ -78,7 +78,7 @@ impl EvaluationState {
             matched: Vec::new(),
             audit_enabled: true,
             enforce: true,
-            removed_rule_ids: HashSet::new(),
+            removed_rule_ids: Vec::new(),
             removed_tags: HashSet::new(),
             removed_targets_by_id: Vec::new(),
             removed_targets_by_tag: Vec::new(),
@@ -133,7 +133,10 @@ impl EvaluationState {
                 }
                 self.skip_until = None;
             }
-            if self.removed_rule_ids.contains(&first.id)
+            if self
+                .removed_rule_ids
+                .iter()
+                .any(|range| range.contains(first.id))
                 || first
                     .actions
                     .tags
@@ -399,8 +402,8 @@ impl EvaluationState {
             CtlAction::RuleEngine(mode) => {
                 self.enforce = matches!(mode, RuleEngineMode::On);
             }
-            CtlAction::RemoveRuleById(id) => {
-                self.removed_rule_ids.insert(*id);
+            CtlAction::RemoveRuleById(range) => {
+                self.removed_rule_ids.push(*range);
             }
             CtlAction::RemoveRuleByTag(tag) => {
                 self.removed_tags.insert(tag.clone());
@@ -1153,6 +1156,23 @@ SecRule MATCHED_VAR "@contains secret-42" "id:9204,phase:1,deny,status:403,msg:'
         let rules = load(
             r#"
 SecRule REQUEST_HEADERS:X-Skip "@eq 1" "id:1,phase:1,pass,ctl:ruleRemoveById=3"
+SecRule ARGS "@contains attack" "id:3,phase:1,deny,status:403"
+"#,
+        );
+        let skipped = eval(&rules, "GET", "/?q=attack", &[("x-skip", "1")], b"");
+        assert_eq!(skipped.decision, Decision::Pass);
+        let blocked = eval(&rules, "GET", "/?q=attack", &[], b"");
+        assert!(matches!(
+            blocked.decision,
+            Decision::Block { rule_id: 3, .. }
+        ));
+    }
+
+    #[test]
+    fn ctl_removes_rule_by_id_range() {
+        let rules = load(
+            r#"
+SecRule REQUEST_HEADERS:X-Skip "@eq 1" "id:1,phase:1,pass,ctl:ruleRemoveById=2-10"
 SecRule ARGS "@contains attack" "id:3,phase:1,deny,status:403"
 "#,
         );

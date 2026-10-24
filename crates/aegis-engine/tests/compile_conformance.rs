@@ -1,7 +1,9 @@
 use std::fs;
 
 use aegis_engine::compile::{load_rules, LoadOptions};
-use aegis_engine::model::{CompiledOperator, Phase, RuleGroup, Selector, Variable};
+use aegis_engine::model::{
+    CompiledOperator, CtlAction, Phase, RuleGroup, RuleIdRange, Selector, Variable,
+};
 use tempfile::tempdir;
 
 fn load(text: &str) -> Result<aegis_engine::model::CompiledRules, aegis_engine::LoadError> {
@@ -344,6 +346,43 @@ fn rejects_count_of_count_and_negated_count() {
 fn compiles_macro_numeric_arguments() {
     let rules = load(r#"SecRule &ARGS "@gt %{tx.limit}" "id:1,phase:1,pass""#).unwrap();
     assert_eq!(rules.rule_count, 1);
+}
+
+#[test]
+fn compiles_rule_remove_by_id_range() {
+    let rules =
+        load(r#"SecRule ARGS "@contains x" "id:1,phase:1,pass,ctl:ruleRemoveById=1-999999""#)
+            .unwrap();
+    let RuleGroup::Single(rule) = &rules.phase1[0] else {
+        panic!("expected single rule");
+    };
+    assert_eq!(
+        rule.actions.ctl,
+        vec![CtlAction::RemoveRuleById(RuleIdRange {
+            start: 1,
+            end: 999999,
+        })]
+    );
+}
+
+#[test]
+fn compiles_rule_remove_by_id_single_value() {
+    let rules =
+        load(r#"SecRule ARGS "@contains x" "id:1,phase:1,pass,ctl:ruleRemoveById=3""#).unwrap();
+    let RuleGroup::Single(rule) = &rules.phase1[0] else {
+        panic!("expected single rule");
+    };
+    assert_eq!(
+        rule.actions.ctl,
+        vec![CtlAction::RemoveRuleById(RuleIdRange { start: 3, end: 3 })]
+    );
+}
+
+#[test]
+fn rejects_reversed_rule_remove_by_id_range() {
+    let error = load(r#"SecRule ARGS "@contains x" "id:1,phase:1,pass,ctl:ruleRemoveById=9-1""#)
+        .unwrap_err();
+    assert!(error.to_string().contains("invalid ruleRemoveById range"));
 }
 
 #[test]

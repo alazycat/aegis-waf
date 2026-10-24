@@ -351,11 +351,23 @@ pub enum RuleEngineMode {
     DetectionOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuleIdRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+impl RuleIdRange {
+    pub fn contains(self, id: u32) -> bool {
+        self.start <= id && id <= self.end
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CtlAction {
     AuditEngine(bool),
     RuleEngine(RuleEngineMode),
-    RemoveRuleById(u32),
+    RemoveRuleById(RuleIdRange),
     RemoveRuleByTag(String),
     RequestBodyProcessor(BodyProcessor),
     ForceRequestBodyVariable(bool),
