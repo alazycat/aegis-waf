@@ -78,6 +78,7 @@ pub struct RequestContext {
     tx: TxStore,
     collections: SharedCollectionStore,
     collection_keys: HashMap<String, String>,
+    matched_entries: Vec<VariableEntry>,
     cache: RefCell<HashMap<Variable, Arc<Vec<VariableEntry>>>>,
 }
 
@@ -134,8 +135,17 @@ impl RequestContext {
             tx: TxStore::default(),
             collections,
             collection_keys: HashMap::new(),
+            matched_entries: Vec::new(),
             cache: RefCell::new(HashMap::new()),
         }
+    }
+
+    pub fn record_match(&mut self, name: &str, key: Option<&str>, value: &str) {
+        self.matched_entries.push(VariableEntry {
+            name: name.to_string(),
+            key: key.map(str::to_string),
+            value: value.to_string(),
+        });
     }
 
     pub fn set_collection_key(&mut self, collection: &str, key: String) {
@@ -262,6 +272,7 @@ impl RequestContext {
                 | Variable::MatchedVar
                 | Variable::MatchedVarName
                 | Variable::MatchedVars(_)
+                | Variable::Count(_)
                 | Variable::Ip(_)
                 | Variable::Session(_)
                 | Variable::User(_)
@@ -412,11 +423,12 @@ impl RequestContext {
                 .get("matched_var_name")
                 .map(|value| vec![VariableEntry::scalar(variable, value.to_string())])
                 .unwrap_or_default(),
-            Variable::MatchedVars(_) => self
-                .tx
-                .get("matched_var_name")
-                .map(|value| vec![VariableEntry::scalar(variable, value.to_string())])
-                .unwrap_or_default(),
+            Variable::MatchedVars(selector) => self
+                .matched_entries
+                .iter()
+                .filter(|entry| name_matches(selector, &entry.name))
+                .cloned()
+                .collect(),
             Variable::Xml(_) => self
                 .xml_values
                 .iter()
@@ -455,6 +467,14 @@ impl RequestContext {
                 .filter(|(name, _)| name_matches(selector, name))
                 .map(|(name, value)| VariableEntry::item("TX", name, value.to_string()))
                 .collect(),
+            Variable::Count(inner) => {
+                let count = self.extract(inner).len();
+                vec![VariableEntry {
+                    name: variable.display_name(),
+                    key: None,
+                    value: count.to_string(),
+                }]
+            }
         }
     }
 

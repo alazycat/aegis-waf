@@ -331,3 +331,11 @@ fn rejects_invalid_selector_regex() {
         "unexpected message: {message}"
     );
 }
+
+#[test]
+fn rejects_count_of_count_and_negated_count() {
+    let error = load(r#"SecRule &&ARGS "@gt 0" "id:1,pass""#).unwrap_err();
+    assert!(error.to_string().contains("count"));
+    let error = load(r#"SecRule !&ARGS "@gt 0" "id:1,pass""#).unwrap_err();
+    assert!(error.to_string().contains("count"));
+}

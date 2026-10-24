@@ -180,6 +180,7 @@ pub enum Variable {
     ResponseBodyLength,
     ResponseContentType,
     Tx(Option<Selector>),
+    Count(Box<Variable>),
 }
 
 impl Variable {
@@ -224,6 +225,7 @@ impl Variable {
             Self::ResponseBodyLength => "RESPONSE_BODY_LENGTH".to_string(),
             Self::ResponseContentType => "RESPONSE_CONTENT_TYPE".to_string(),
             Self::Tx(selector) => selected("TX", selector),
+            Self::Count(inner) => format!("&{}", inner.display_name()),
         }
     }
 
@@ -242,12 +244,23 @@ impl Variable {
             | Self::Xml(selector)
             | Self::ResponseHeaders(selector)
             | Self::Tx(selector) => selector.as_ref(),
+            Self::Count(inner) => inner.selector(),
             _ => None,
         }
     }
 
     pub fn same_family(&self, other: &Self) -> bool {
-        std::mem::discriminant(self) == std::mem::discriminant(other)
+        let left = self.unwrap_count();
+        let right = other.unwrap_count();
+        std::mem::discriminant(left) == std::mem::discriminant(right)
+    }
+
+    fn unwrap_count(&self) -> &Self {
+        let mut current = self;
+        while let Self::Count(inner) = current {
+            current = inner;
+        }
+        current
     }
 }
 

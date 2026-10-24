@@ -209,6 +209,7 @@ impl EvaluationState {
             return Some(RuleHit {
                 value: String::new(),
                 variable_name: String::new(),
+                key: None,
                 captures: Vec::new(),
             });
         }
@@ -248,6 +249,7 @@ impl EvaluationState {
                     return Some(RuleHit {
                         value: matched_value,
                         variable_name: entry.name.clone(),
+                        key: entry.key.clone(),
                         captures,
                     });
                 }
@@ -279,6 +281,8 @@ impl EvaluationState {
     }
 
     fn apply_hit_context(&mut self, rule: &CompiledRule, hit: &RuleHit) {
+        self.context
+            .record_match(&hit.variable_name, hit.key.as_deref(), &hit.value);
         self.context.tx_mut().set("matched_var", hit.value.clone());
         self.context
             .tx_mut()
@@ -476,6 +480,7 @@ fn macro_integer(template: &str, context: &RequestContext) -> i64 {
 struct RuleHit {
     value: String,
     variable_name: String,
+    key: Option<String>,
     captures: Vec<String>,
 }
 
@@ -1244,17 +1249,55 @@ SecRule TX:SEEN "@eq 1" "id:9402,phase:5,deny,status:403"
     }
 
     #[test]
-    fn matched_vars_is_available_to_later_rules() {
+    fn matched_vars_contains_matched_values() {
         let rules = load(
             r#"
 SecRule ARGS "@contains secret" "id:9501,phase:1,pass"
-SecRule MATCHED_VARS "@contains ARGS" "id:9502,phase:1,deny,status:403"
+SecRule MATCHED_VARS "@contains secret" "id:9502,phase:1,deny,status:403"
 "#,
         );
         let evaluation = eval(&rules, "GET", "/?q=secret", &[], b"");
         assert!(matches!(
             evaluation.decision,
             Decision::Block { rule_id: 9502, .. }
+        ));
+        let names = eval(
+            &load(
+                r#"
+SecRule ARGS "@contains secret" "id:9501,phase:1,pass"
+SecRule MATCHED_VARS "@contains ARGS" "id:9502,phase:1,deny,status:403"
+"#,
+            ),
+            "GET",
+            "/?q=secret",
+            &[],
+            b"",
+        );
+        assert_eq!(names.decision, Decision::Pass);
+    }
+
+    #[test]
+    fn count_variables_report_collection_sizes() {
+        let rules = load(r#"SecRule &ARGS "@eq 2" "id:4301,phase:1,deny,status:403""#);
+        let evaluation = eval(&rules, "GET", "/?a=1&b=2", &[], b"");
+        assert!(matches!(
+            evaluation.decision,
+            Decision::Block { rule_id: 4301, .. }
+        ));
+    }
+
+    #[test]
+    fn count_tx_reports_presence() {
+        let rules = load(
+            r#"
+SecAction "id:4311,phase:1,pass,setvar:tx.flag=1"
+SecRule &TX:FLAG "@eq 1" "id:4312,phase:1,deny,status:403"
+"#,
+        );
+        let evaluation = eval(&rules, "GET", "/", &[], b"");
+        assert!(matches!(
+            evaluation.decision,
+            Decision::Block { rule_id: 4312, .. }
         ));
     }
 

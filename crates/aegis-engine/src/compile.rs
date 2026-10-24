@@ -538,7 +538,9 @@ fn first_rule_mut(group: &mut RuleGroup) -> &mut CompiledRule {
 }
 
 fn variable_prefilter_scope(variable: &Variable) -> Option<PrefilterScope> {
-    if matches!(variable.selector(), Some(Selector::Regex(_))) {
+    if matches!(variable, Variable::Count(_))
+        || matches!(variable.selector(), Some(Selector::Regex(_)))
+    {
         return None;
     }
     match variable {
@@ -583,6 +585,7 @@ fn variable_prefilter_scope(variable: &Variable) -> Option<PrefilterScope> {
         | Variable::FilesSizes
         | Variable::FilesCombinedSize
         | Variable::FilesTmpnames
+        | Variable::Count(_)
         | Variable::Ip(_)
         | Variable::Session(_)
         | Variable::User(_)
@@ -887,20 +890,24 @@ fn parse_variables(
             Some(rest) => (true, rest),
             None => (false, item),
         };
-        if item.starts_with('&') {
-            if options.lenient {
-                tracing::warn!(
-                    file = %file.display(),
-                    line,
-                    "skipping rule: variable counts are unsupported"
-                );
-                return Ok(None);
-            }
+        let (count, item) = match item.strip_prefix('&') {
+            Some(rest) => (true, rest),
+            None => (false, item),
+        };
+        if count && negated {
             return Err(compile_error(
                 file,
                 line,
                 column,
-                "variable counts (&VAR) are not supported".to_string(),
+                "variable counts cannot be negated".to_string(),
+            ));
+        }
+        if item.is_empty() || item.starts_with('&') {
+            return Err(compile_error(
+                file,
+                line,
+                column,
+                "invalid variable count".to_string(),
             ));
         }
         let (name, selector) = match item.split_once(':') {
@@ -967,6 +974,11 @@ fn parse_variables(
                     format!("unsupported variable {item}"),
                 ));
             }
+        };
+        let variable = if count {
+            Variable::Count(Box::new(variable))
+        } else {
+            variable
         };
         specs.push(VariableSpec { variable, negated });
     }
