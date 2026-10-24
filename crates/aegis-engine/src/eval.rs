@@ -242,10 +242,11 @@ impl EvaluationState {
                 if self.entry_excluded(rule, spec, entry) {
                     continue;
                 }
+                let expand = |template: &str| self.expand_template(template);
                 let matched_value;
                 let matched = if rule.transformations.is_empty() {
                     matched_value = entry.value.clone();
-                    rule.operator.matches(&entry.value)
+                    rule.operator.matches_with(&entry.value, &expand)
                 } else {
                     let mut current = entry.value.clone();
                     let mut next = String::new();
@@ -256,7 +257,7 @@ impl EvaluationState {
                         std::mem::swap(&mut current, &mut next);
                     }
                     matched_value = current.clone();
-                    rule.operator.matches(&current)
+                    rule.operator.matches_with(&current, &expand)
                 };
                 let matched = if rule.operator_negated {
                     !matched
@@ -1390,6 +1391,23 @@ SecRule ARGS_POST:a "@eq 1" "id:4522,phase:2,deny,status:403"
         assert!(matches!(
             evaluation.decision,
             Decision::Block { rule_id: 4522, .. }
+        ));
+    }
+
+    #[test]
+    fn numeric_operator_arguments_expand_macros() {
+        let rules = load(
+            r#"
+SecAction "id:4601,phase:1,pass,setvar:tx.limit=2"
+SecRule &ARGS "@gt %{tx.limit}" "id:4602,phase:1,deny,status:403"
+"#,
+        );
+        let passed = eval(&rules, "GET", "/?a=1&b=2", &[], b"");
+        assert_eq!(passed.decision, Decision::Pass);
+        let blocked = eval(&rules, "GET", "/?a=1&b=2&c=3", &[], b"");
+        assert!(matches!(
+            blocked.decision,
+            Decision::Block { rule_id: 4602, .. }
         ));
     }
 

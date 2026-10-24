@@ -341,6 +341,12 @@ fn rejects_count_of_count_and_negated_count() {
 }
 
 #[test]
+fn compiles_macro_numeric_arguments() {
+    let rules = load(r#"SecRule &ARGS "@gt %{tx.limit}" "id:1,phase:1,pass""#).unwrap();
+    assert_eq!(rules.rule_count, 1);
+}
+
+#[test]
 fn compiles_ctl_extensions() {
     let rules = load(
         r#"

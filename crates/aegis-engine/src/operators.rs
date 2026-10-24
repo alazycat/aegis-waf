@@ -2,6 +2,21 @@ use std::net::IpAddr;
 
 use ipnet::IpNet;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NumberArg {
+    Literal(i64),
+    Template(String),
+}
+
+impl NumberArg {
+    fn resolve<F: Fn(&str) -> String>(&self, expand: &F) -> Option<i64> {
+        match self {
+            Self::Literal(value) => Some(*value),
+            Self::Template(template) => expand(template).trim().parse::<i64>().ok(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum CompiledOperator {
     Rx(regex::Regex),
@@ -12,10 +27,10 @@ pub enum CompiledOperator {
     Pm(Vec<String>),
     IpMatch(Vec<IpNet>),
     Within(String),
-    Gt(i64),
-    Ge(i64),
-    Lt(i64),
-    Le(i64),
+    Gt(NumberArg),
+    Ge(NumberArg),
+    Lt(NumberArg),
+    Le(NumberArg),
     DetectSqli,
     DetectXss,
     Unconditional,
@@ -26,6 +41,10 @@ pub enum CompiledOperator {
 
 impl CompiledOperator {
     pub fn matches(&self, input: &str) -> bool {
+        self.matches_with(input, &|_| String::new())
+    }
+
+    pub fn matches_with<F: Fn(&str) -> String>(&self, input: &str, expand: &F) -> bool {
         match self {
             Self::Rx(regex) => regex.is_match(input),
             Self::Eq(expected) => input == expected,
@@ -41,18 +60,18 @@ impl CompiledOperator {
                 .map(|address| networks.iter().any(|network| network.contains(&address)))
                 .unwrap_or(false),
             Self::Within(haystack) => haystack.contains(input),
-            Self::Gt(value) => parse_number(input)
-                .map(|number| number > *value)
-                .unwrap_or(false),
-            Self::Ge(value) => parse_number(input)
-                .map(|number| number >= *value)
-                .unwrap_or(false),
-            Self::Lt(value) => parse_number(input)
-                .map(|number| number < *value)
-                .unwrap_or(false),
-            Self::Le(value) => parse_number(input)
-                .map(|number| number <= *value)
-                .unwrap_or(false),
+            Self::Gt(value) => {
+                compare_numbers(input, value, expand, |number, limit| number > limit)
+            }
+            Self::Ge(value) => {
+                compare_numbers(input, value, expand, |number, limit| number >= limit)
+            }
+            Self::Lt(value) => {
+                compare_numbers(input, value, expand, |number, limit| number < limit)
+            }
+            Self::Le(value) => {
+                compare_numbers(input, value, expand, |number, limit| number <= limit)
+            }
             Self::DetectSqli => libinjectionrs::detect_sqli(input.as_bytes()).is_injection(),
             Self::DetectXss => libinjectionrs::detect_xss(input.as_bytes()).is_injection(),
             Self::Unconditional => true,
@@ -88,6 +107,18 @@ fn invalid_url_encoding(input: &str) -> bool {
 
 fn parse_number(input: &str) -> Option<i64> {
     input.trim().parse::<i64>().ok()
+}
+
+fn compare_numbers<F: Fn(&str) -> String>(
+    input: &str,
+    limit: &NumberArg,
+    expand: &F,
+    compare: impl Fn(i64, i64) -> bool,
+) -> bool {
+    match (parse_number(input), limit.resolve(expand)) {
+        (Some(number), Some(limit)) => compare(number, limit),
+        _ => false,
+    }
 }
 
 pub fn parse_ip_match(argument: &str) -> Result<Vec<IpNet>, String> {
@@ -137,8 +168,8 @@ mod tests {
 
     #[test]
     fn numeric_operators_handle_invalid_input() {
-        assert!(CompiledOperator::Gt(5).matches("6"));
-        assert!(!CompiledOperator::Gt(5).matches("abc"));
+        assert!(CompiledOperator::Gt(NumberArg::Literal(5)).matches("6"));
+        assert!(!CompiledOperator::Gt(NumberArg::Literal(5)).matches("abc"));
     }
 
     #[test]

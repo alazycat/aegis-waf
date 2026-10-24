@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub use crate::operators::CompiledOperator;
+pub use crate::operators::{CompiledOperator, NumberArg};
 pub use crate::transforms::Transform;
 
 #[derive(Debug, Clone)]
@@ -186,7 +186,9 @@ pub enum Variable {
     Args(Option<Selector>),
     ArgsGet(Option<Selector>),
     ArgsPost(Option<Selector>),
-    ArgsNames,
+    ArgsNames(Option<Selector>),
+    ArgsGetNames,
+    ArgsCombinedSize,
     RequestCookies(Option<Selector>),
     RequestCookiesNames,
     RequestBody,
@@ -234,7 +236,9 @@ impl Variable {
             Self::Args(selector) => selected("ARGS", selector),
             Self::ArgsGet(selector) => selected("ARGS_GET", selector),
             Self::ArgsPost(selector) => selected("ARGS_POST", selector),
-            Self::ArgsNames => "ARGS_NAMES".to_string(),
+            Self::ArgsNames(selector) => selected("ARGS_NAMES", selector),
+            Self::ArgsGetNames => "ARGS_GET_NAMES".to_string(),
+            Self::ArgsCombinedSize => "ARGS_COMBINED_SIZE".to_string(),
             Self::RequestCookies(selector) => selected("REQUEST_COOKIES", selector),
             Self::RequestCookiesNames => "REQUEST_COOKIES_NAMES".to_string(),
             Self::RequestBody => "REQUEST_BODY".to_string(),
@@ -273,6 +277,7 @@ impl Variable {
             | Self::Args(selector)
             | Self::ArgsGet(selector)
             | Self::ArgsPost(selector)
+            | Self::ArgsNames(selector)
             | Self::RequestCookies(selector)
             | Self::MultipartPartHeaders(selector)
             | Self::Ip(selector)

@@ -563,9 +563,13 @@ fn variable_prefilter_scope(variable: &Variable) -> Option<PrefilterScope> {
             headers: true,
             ..Default::default()
         }),
-        Variable::Args(_) | Variable::ArgsNames => Some(PrefilterScope {
+        Variable::Args(_) | Variable::ArgsNames(_) => Some(PrefilterScope {
             query: true,
             body: true,
+            ..Default::default()
+        }),
+        Variable::ArgsGetNames => Some(PrefilterScope {
+            query: true,
             ..Default::default()
         }),
         Variable::ArgsGet(_) => Some(PrefilterScope {
@@ -596,6 +600,7 @@ fn variable_prefilter_scope(variable: &Variable) -> Option<PrefilterScope> {
         | Variable::Session(_)
         | Variable::User(_)
         | Variable::Global(_)
+        | Variable::ArgsCombinedSize
         | Variable::RequestBodyLength
         | Variable::RemoteAddr
         | Variable::UniqueId
@@ -935,7 +940,9 @@ fn parse_variables(
             "ARGS" => Variable::Args(selector),
             "ARGS_GET" => Variable::ArgsGet(selector),
             "ARGS_POST" => Variable::ArgsPost(selector),
-            "ARGS_NAMES" if selector.is_none() => Variable::ArgsNames,
+            "ARGS_NAMES" => Variable::ArgsNames(selector),
+            "ARGS_GET_NAMES" if selector.is_none() => Variable::ArgsGetNames,
+            "ARGS_COMBINED_SIZE" if selector.is_none() => Variable::ArgsCombinedSize,
             "REQUEST_COOKIES" => Variable::RequestCookies(selector),
             "REQUEST_COOKIES_NAMES" if selector.is_none() => Variable::RequestCookiesNames,
             "REQUEST_BODY" if selector.is_none() => Variable::RequestBody,
@@ -1058,10 +1065,10 @@ fn parse_operator(raw: &str, rule_file: &Path) -> Result<(CompiledOperator, bool
         "pmfromfile" => CompiledOperator::Pm(load_pm_from_file(&argument, rule_file)?),
         "ipmatch" => CompiledOperator::IpMatch(parse_ip_match(&argument)?),
         "within" => CompiledOperator::Within(argument),
-        "gt" => CompiledOperator::Gt(parse_integer(&argument)?),
-        "ge" => CompiledOperator::Ge(parse_integer(&argument)?),
-        "lt" => CompiledOperator::Lt(parse_integer(&argument)?),
-        "le" => CompiledOperator::Le(parse_integer(&argument)?),
+        "gt" => CompiledOperator::Gt(parse_number_arg(&argument)?),
+        "ge" => CompiledOperator::Ge(parse_number_arg(&argument)?),
+        "lt" => CompiledOperator::Lt(parse_number_arg(&argument)?),
+        "le" => CompiledOperator::Le(parse_number_arg(&argument)?),
         "detectsqli" => {
             if !argument.is_empty() {
                 return Err("@detectSQLi does not accept an argument".to_string());
@@ -1089,10 +1096,15 @@ fn parse_operator(raw: &str, rule_file: &Path) -> Result<(CompiledOperator, bool
     Ok((operator, negated))
 }
 
-fn parse_integer(raw: &str) -> Result<i64, String> {
-    raw.trim()
-        .parse::<i64>()
-        .map_err(|error| format!("invalid integer {raw}: {error}"))
+fn parse_number_arg(raw: &str) -> Result<NumberArg, String> {
+    let trimmed = raw.trim();
+    if let Ok(value) = trimmed.parse::<i64>() {
+        Ok(NumberArg::Literal(value))
+    } else if trimmed.contains("%{") {
+        Ok(NumberArg::Template(trimmed.to_string()))
+    } else {
+        Err(format!("invalid integer {raw}"))
+    }
 }
 
 fn parse_byte_ranges(raw: &str) -> Result<Vec<(u8, u8)>, String> {

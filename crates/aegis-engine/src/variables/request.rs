@@ -366,12 +366,27 @@ impl RequestContext {
                 .filter(|(name, _)| name_matches(selector, name))
                 .map(|(name, value)| VariableEntry::item("ARGS_POST", name, value.clone()))
                 .collect(),
-            Variable::ArgsNames => self
+            Variable::ArgsNames(selector) => self
                 .query_pairs
                 .iter()
                 .chain(self.body_pairs.iter())
+                .filter(|(name, _)| name_matches(selector, name))
                 .map(|(name, _)| VariableEntry::item("ARGS_NAMES", name, name.clone()))
                 .collect(),
+            Variable::ArgsGetNames => self
+                .query_pairs
+                .iter()
+                .map(|(name, _)| VariableEntry::item("ARGS_GET_NAMES", name, name.clone()))
+                .collect(),
+            Variable::ArgsCombinedSize => vec![VariableEntry::scalar(
+                variable,
+                self.query_pairs
+                    .iter()
+                    .chain(self.body_pairs.iter())
+                    .map(|(name, value)| name.len() + value.len())
+                    .sum::<usize>()
+                    .to_string(),
+            )],
             Variable::RequestCookies(selector) => self
                 .cookies
                 .iter()
@@ -791,6 +806,17 @@ mod tests {
     }
 
     #[test]
+    fn args_names_selector_filters_names() {
+        let headers = header_map(&[]);
+        let context = context(&headers);
+        let selector = Selector::Regex(RegexSelector::new("^q$").unwrap());
+        assert_eq!(
+            extract(&context, Variable::ArgsNames(Some(selector))),
+            vec!["q"]
+        );
+    }
+
+    #[test]
     fn regex_selector_filters_cookie_names() {
         let headers = header_map(&[("cookie", "_ga=1; session=abc; _gid=2")]);
         let context = context(&headers);
@@ -807,7 +833,7 @@ mod tests {
         let entries = context.extract(&Variable::Args(None));
         assert_eq!(entries[0].name, "ARGS:q");
         assert_eq!(entries[0].key.as_deref(), Some("q"));
-        let names = context.extract(&Variable::ArgsNames);
+        let names = context.extract(&Variable::ArgsNames(None));
         assert_eq!(names[0].name, "ARGS_NAMES:q");
         assert_eq!(names[0].value, "q");
     }
@@ -824,9 +850,18 @@ mod tests {
             extract(&context, Variable::Args(None)),
             vec!["<script>", "2"]
         );
-        let mut names = extract(&context, Variable::ArgsNames);
+        let mut names = extract(&context, Variable::ArgsNames(None));
         names.sort();
         assert_eq!(names, vec!["page", "q"]);
+    }
+
+    #[test]
+    fn extracts_args_get_names_and_combined_size() {
+        let headers = header_map(&[("content-type", "application/x-www-form-urlencoded")]);
+        let mut context = context(&headers);
+        context.set_body(b"x=1");
+        assert_eq!(extract(&context, Variable::ArgsGetNames), vec!["q", "page"]);
+        assert_eq!(extract(&context, Variable::ArgsCombinedSize), vec!["16"]);
     }
 
     #[test]
