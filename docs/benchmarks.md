@@ -386,69 +386,60 @@ bash scripts/bench_e2e.sh
 | 请求文件 | 28 |
 | 可解析文件 | 28 |
 | `SecRule`/`SecAction` 指令 | 693 |
-| 编译成功规则 | 599（86.4%） |
-| 跳过的规则指令 | 102（14.6%） |
+| 编译成功规则 | 701（100%） |
+| 跳过的规则指令 | 0（0%） |
 | `SecDefaultAction` | 5 |
-| 阶段分组 | 558 |
+| 阶段分组 | 628 |
 
-剩余跳过的主要原因是引擎尚未支持的：
-
-- 变量计数语法（`&TX`、`&ARGS`、`&REQUEST_HEADERS`、`&MULTIPART_PART_HEADERS`），
-  主要集中在 `REQUEST-901-INITIALIZATION.conf` 的初始化检查；
-- `MULTIPART_PART_HEADERS`、`REQBODY_PROCESSOR`、`UNIQUE_ID` 等变量；
-- `@validateUtf8Encoding`、`@validateUrlEncoding` 算子；
-- 包含上述不支持项的链会整链跳过。
-
-未知动作与 `ctl` 在 `lenient` 模式下会被忽略，不会导致规则被跳过。
+所有 `SecRule`/`SecAction` 指令均可编译。未知动作与 `ctl` 在 `lenient` 模式下
+仍会被忽略，不计入跳过；语义上的不支持项见第 13.4 节与 `docs/compatibility.md`。
 
 ### 13.2 预筛覆盖率
 
 | 指标 | 数值 |
 |---|---:|
-| 分组总数 | 558 |
-| 预筛分组 | 42（7.5%） |
-| 其中 AC | 33 组 / 44 规则 |
-| 其中 RegexSet | 9 组 / 11 规则 |
-| 规则总数（按分组统计） | 599 |
-| 预筛规则 | 55（9.2%） |
-| 非 `SecAction` 算子的分组 | 550 |
-| 非 `SecAction` 算子的预筛分组 | 42（7.6%） |
-| **非 TX 算子分组** | **321** |
-| **非 TX 算子预筛分组** | **42（13.1%）** |
-| **非 TX 算子规则** | **360** |
-| **非 TX 算子预筛规则** | **55（15.3%）** |
+| 分组总数 | 628 |
+| 预筛分组 | 44（7.0%） |
+| 其中 AC | 34 组 / 46 规则 |
+| 其中 RegexSet | 10 组 / 13 规则 |
+| 规则总数（按分组统计） | 701 |
+| 预筛规则 | 59（8.4%） |
+| 非 `SecAction` 算子的分组 | 620 |
+| 非 `SecAction` 算子的预筛分组 | 44（7.1%） |
+| **非 TX 算子分组** | **379** |
+| **非 TX 算子预筛分组** | **44（11.6%）** |
+| **非 TX 算子规则** | **446** |
+| **非 TX 算子预筛规则** | **59（13.2%）** |
 
 分组原因分解：
 
 | 原因 | 分组 | 规则 |
 |---|---:|---:|
-| AC 字面量 | 33 | 44 |
-| RegexSet | 9 | 11 |
+| AC 字面量 | 34 | 46 |
+| RegexSet | 10 | 13 |
 | `SecAction` 无条件规则 | 8 | 8 |
-| 含 TX 变量（异常评分） | 229 | 231 |
+| 含 TX 变量（异常评分） | 241 | 247 |
 | 响应变量规则（Phase 3/4/5） | 61 | 62 |
-| 算子取反 | 10 | 10 |
-| 匹配空字符串的 regex | 5 | 9 |
-| 小 regex 集合（< 8 个模式） | 181 | 199 |
+| 算子取反 | 15 | 22 |
+| 匹配空字符串的 regex | 6 | 12 |
+| 小 regex 集合（< 8 个模式） | 187 | 206 |
 | `REMOTE_ADDR` 规则 | 1 | 3 |
-| 其他不可预筛算子 | 21 | 22 |
+| 其他不可预筛算子 | 65 | 82 |
 
 ### 13.3 解释
 
-- **总体覆盖率低的主因仍是 TX 异常评分规则**：229 个分组只读写 `TX` 做数值累计/比较，
+- **总体覆盖率低的主因仍是 TX 异常评分规则**：241 个分组只读写 `TX` 做数值累计/比较，
   没有可提取的请求字面量；它们是廉价的整数比较，逐条求值成本很低。
 - **响应阶段规则（61 组 / 62 规则）** 使用 `RESPONSE_STATUS`、`RESPONSE_HEADERS`、
   `RESPONSE_BODY` 等变量，不在请求预筛范围内；代理在收到上游响应后执行 Phase 3/4/5。
-- 去掉 TX 和响应规则后，非 TX 请求算子规则的预筛覆盖率约为 **15.3%**。
-  剩余未预筛的主要是小 regex 集合（199 条，同一变换变体内 < 8 个模式），
+- 去掉 TX 和响应规则后，非 TX 请求算子规则的预筛覆盖率约为 **13.2%**。
+  剩余未预筛的主要是小 regex 集合（206 条，同一变换变体内 < 8 个模式），
   按第 12 节阈值逐条求值；其次是取反算子、空匹配 regex、`REMOTE_ADDR` 等。
 - 如果把 RegexSet 阈值降到 1，预筛覆盖会显著上升，但小规则集会退化；
   当前阈值 8 是性能与覆盖率的折中。
-- **86.4% 的 CRS 规则指令已能编译**，比上一轮（78.1%）提升 8.3 个百分点，主要来自：
-  `FILES`/multipart、`@pmFromFile`、`MATCHED_VARS`、持久化集合与 `initcol`、
-  Phase 5/`skipAfter`、新增变换、`t:none` 与大小写不敏感的 `@pm`。
-  剩余 14.6% 主要是变量计数语法、multipart 分部头变量、`REQBODY_PROCESSOR`/
-  `UNIQUE_ID` 以及两个校验算子。
+- **701 / 701 条 CRS 指令全部可编译**。本轮主要来自变量计数、正则选择器与按项取反、
+  `MULTIPART_PART_HEADERS`/`REQBODY_PROCESSOR`/`UNIQUE_ID`、校验算子、`multiMatch`、
+  `ctl` 扩展，以及 `@gt/@ge/@lt/@le` 的宏参数（CRS 的异常评分拦截规则依赖它）。
 
 ### 13.4 局限
 
@@ -524,7 +515,7 @@ bash scripts/bench_e2e.sh
   `MemoryCollectionStore`，跨请求保留。
 - **Phase 5 与 `skipAfter`**：Phase 5 在响应处理完成后执行；`skipAfter:<label>`
   跳到当前阶段对应 `SecMarker` 之后。
-- **`MATCHED_VARS`**：当前简化为上一规则匹配的变量名。
+- **`MATCHED_VARS`**：本轮先简化为上一规则匹配的变量名；完整值集合语义见第 16 节。
 - **新增变换**：`jsDecode`、`cssDecode`、`cmdLine`、`utf8toUnicode`、
   `escapeSeqDecode`、`removeWhitespace`、`replaceComments`、`removeCommentsChar`、
   `normalizePathWin`、`length`、`sha1`、`hexEncode`；`t:none` 清除继承的默认变换。
@@ -540,3 +531,40 @@ bash scripts/bench_e2e.sh
 - 149 个测试全部通过（引擎 112，代理 37）。
 - `cargo fmt --check` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
 - `bash scripts/bench_crs.sh` 可复现第 13 节的数字。
+
+## 16. 剩余 CRS 兼容项（2026-10-24）
+
+### 16.1 新增能力
+
+- **变量选择器**：支持 `VAR:/regex/`；字面量选择器大小写不敏感。
+- **按项取反**：`!VARIABLE[:selector]` 按变量项名称排除，例如
+  `ARGS|!ARGS:foo`、`REQUEST_COOKIES|!REQUEST_COOKIES:/^_ga/`。
+- **变量计数**：`&VAR[:selector]` 返回条目数，例如 `&TX:foo`、`&ARGS`、
+  `&MULTIPART_PART_HEADERS:_charset_`。
+- **完整 `MATCHED_VARS`**：返回本次事务所有命中值；`MATCHED_VAR_NAME`
+  带集合键（如 `ARGS:foo`）。
+- **新变量**：`MULTIPART_PART_HEADERS`（part 名 → 原始头行）、
+  `REQBODY_PROCESSOR`、`UNIQUE_ID`、`ARGS_GET_NAMES`、`ARGS_COMBINED_SIZE`。
+- **请求体处理器**：`URLENCODED`、`MULTIPART`、`JSON`、`XML`；
+  multipart 非文件字段进入 `ARGS_POST`；无 `Content-Type` 时默认 URLENCODED。
+- **校验算子**：`@validateUtf8Encoding`、`@validateUrlEncoding`；
+  修正 `@validateByteRange` 为“校验失败时匹配”。
+- **宏数值参数**：`@gt/@ge/@lt/@le` 的参数支持 `%{tx.name}` 等宏，
+  这是 CRS 异常评分拦截规则能够生效的前提。
+- **`multiMatch`**：每个命中执行一次非破坏性动作（`setvar` 按命中次数累计）；
+  每条规则只记录一条审计。
+- **`ctl` 扩展**：`requestBodyProcessor`、`forceRequestBodyVariable`、
+  `ruleRemoveTargetById/Tag`。
+
+### 16.2 CRS 覆盖变化
+
+- 可编译 `SecRule`/`SecAction` 从 **599（86.4%）** 提升到 **701/701（100%）**，
+  跳过 0 条。
+- 阶段分组从 558 增加到 628；可预筛规则 59 条（8.4%）。
+- 详细数字与原因分解见第 13 节。
+
+### 16.3 验证
+
+- 173 个测试全部通过（引擎 136，代理 37）。
+- `cargo fmt --check` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+- `bash scripts/bench_crs.sh` 可复现第 13 节与本节数字。

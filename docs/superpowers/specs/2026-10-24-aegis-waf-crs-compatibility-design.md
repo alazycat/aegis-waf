@@ -60,7 +60,7 @@ pub struct RegexSelector {
 
 所有集合变量的选择器改为 `Option<Selector>`：
 
-`REQUEST_HEADERS`、`ARGS`、`ARGS_GET`、`ARGS_POST`、`REQUEST_COOKIES`、
+`REQUEST_HEADERS`、`ARGS`、`ARGS_GET`、`ARGS_POST`、`ARGS_NAMES`、`REQUEST_COOKIES`、
 `IP`、`SESSION`、`USER`、`GLOBAL`、`XML`、`TX`、`RESPONSE_HEADERS`、
 `MATCHED_VARS`。
 
@@ -71,6 +71,8 @@ Variable::Count(Box<Variable>),                 // &VAR
 Variable::MultipartPartHeaders(Option<Selector>),
 Variable::ReqbodyProcessor,                     // REQBODY_PROCESSOR
 Variable::UniqueId,                             // UNIQUE_ID
+Variable::ArgsGetNames,                         // ARGS_GET_NAMES
+Variable::ArgsCombinedSize,                     // ARGS_COMBINED_SIZE
 ```
 
 `Count` 只允许出现一次（拒绝 `&&` 或嵌套 `&`）。
@@ -218,6 +220,8 @@ ModSecurity 的 `validate*` 算子在**校验失败**时匹配。统一按此语
 - `@validateUtf8Encoding`：输入含 U+FFFD 替换字符 → 匹配。
   - 说明：引擎内部字符串使用 lossy 转换，非法 UTF-8 会变成 U+FFFD；这是近似检测。
 - `@validateUrlEncoding`：存在 `%` 未跟随两位十六进制（含结尾不完整）→ 匹配。
+- `@gt/@ge/@lt/@le` 的参数支持 `%{...}` 宏：编译期保留模板，求值时用 TX 与请求上下文展开后再解析为整数。
+  CRS 的异常评分拦截规则依赖这一能力。
 
 ## 8. 代理接入
 

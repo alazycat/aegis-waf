@@ -1,6 +1,6 @@
 # ModSecurity 子集兼容报告（v0.1）
 
-- 更新：2026-10-23
+- 更新：2026-10-24
 - 参考：OWASP ModSecurity Reference Manual、OWASP CRS v4.31.0-dev
 
 ## 结论
@@ -8,9 +8,10 @@
 aegis-waf v0.1 不声称完整兼容 OWASP CRS。引擎实现了下表列出的语法与语义子集，
 并通过 `crates/aegis-engine/tests/` 与 `crates/aegis-proxy/tests/` 下的一致性测试验证。
 
-在真实 CRS 规则上，`lenient: true` 模式可以编译 **599 / 693（86.4%）** 的
-`SecRule`/`SecAction` 指令；剩余规则主要依赖尚未实现的高级 ctl、变量计数、
-个别操作符和响应压缩检测。详见 `docs/benchmarks.md` 第 13 节。
+在真实 CRS 规则上，`lenient: true` 模式可以编译 **701 / 701（100%）** 的
+`SecRule`/`SecAction` 指令。可编译不等于语义完全兼容；剩余限制是持久化集合
+TTL/Redis、完整 XPath、响应压缩检测等，见文末“已知不兼容”。详见
+`docs/benchmarks.md` 第 13 节与第 16 节。
 
 ## 已支持
 
@@ -18,13 +19,13 @@ aegis-waf v0.1 不声称完整兼容 OWASP CRS。引擎实现了下表列出的�
 |---|---|
 | 阶段 | Phase 1（请求头）、Phase 2（请求体）、Phase 3（响应头）、Phase 4（响应体）、Phase 5（日志） |
 | 指令 | `SecRule`（2 或 3 参数）、`SecAction`、`SecDefaultAction`、`SecMarker`、`Include` |
-| 请求变量 | `REQUEST_URI`、`REQUEST_URI_RAW`、`REQUEST_LINE`、`REQUEST_PROTOCOL`、`REQUEST_BASENAME`、`REQUEST_METHOD`、`QUERY_STRING`、`REQUEST_FILENAME`、`REQUEST_HEADERS[:name]`、`REQUEST_HEADERS_NAMES`、`ARGS[:name]`、`ARGS_GET[:name]`、`ARGS_POST[:name]`、`ARGS_NAMES`、`REQUEST_COOKIES[:name]`、`REQUEST_COOKIES_NAMES`、`REQUEST_BODY`、`REQUEST_BODY_LENGTH`、`FILES`、`FILES_NAMES`、`FILES_SIZES`、`FILES_COMBINED_SIZE`、`FILES_TMPNAMES`、`REMOTE_ADDR`、`TX[:name]` |
+| 请求变量 | `REQUEST_URI`、`REQUEST_URI_RAW`、`REQUEST_LINE`、`REQUEST_PROTOCOL`、`REQUEST_BASENAME`、`REQUEST_METHOD`、`QUERY_STRING`、`REQUEST_FILENAME`、`REQUEST_HEADERS[:name]`、`REQUEST_HEADERS_NAMES`、`ARGS[:name]`、`ARGS_GET[:name]`、`ARGS_POST[:name]`、`ARGS_NAMES[:name]`、`ARGS_GET_NAMES`、`ARGS_COMBINED_SIZE`、`REQUEST_COOKIES[:name]`、`REQUEST_COOKIES_NAMES`、`REQUEST_BODY`、`REQUEST_BODY_LENGTH`、`MULTIPART_PART_HEADERS[:part]`、`REQBODY_PROCESSOR`、`FILES`、`FILES_NAMES`、`FILES_SIZES`、`FILES_COMBINED_SIZE`、`FILES_TMPNAMES`、`REMOTE_ADDR`、`UNIQUE_ID`、`TX[:name]` |
 | 持久化集合 | `IP[:name]`、`SESSION[:name]`、`USER[:name]`、`GLOBAL[:name]`（内存实现） |
-| 匹配/XML 变量 | `MATCHED_VAR`、`MATCHED_VAR_NAME`、`MATCHED_VARS`、`XML` / `XML:selector` |
+| 匹配/XML 变量 | `MATCHED_VAR`、`MATCHED_VAR_NAME`、`MATCHED_VARS[:name]`、`XML` / `XML:selector` |
 | 响应变量 | `RESPONSE_STATUS`、`RESPONSE_HEADERS[:name]`、`RESPONSE_HEADERS_NAMES`、`RESPONSE_BODY`、`RESPONSE_BODY_LENGTH`、`RESPONSE_CONTENT_TYPE` |
-| 算子 | `@rx`、`@eq`、`@streq`、`@contains`、`@beginsWith`、`@endsWith`、`@pm`、`@pmFromFile`、`@ipMatch`、`@within`、`@gt`、`@ge`、`@lt`、`@le`、`@detectSQLi`、`@detectXSS`、`@unconditionalMatch`、`@validateByteRange`，支持 `!` 取反 |
+| 算子 | `@rx`、`@eq`、`@streq`、`@contains`、`@beginsWith`、`@endsWith`、`@pm`、`@pmFromFile`、`@ipMatch`、`@within`、`@gt`、`@ge`、`@lt`、`@le`、`@detectSQLi`、`@detectXSS`、`@unconditionalMatch`、`@validateByteRange`、`@validateUtf8Encoding`、`@validateUrlEncoding`，支持 `!` 取反与 `%{...}` 宏参数 |
 | 变换 | `t:none`、`lowercase`、`urlDecode`、`urlDecodeUni`、`htmlEntityDecode`、`jsDecode`、`cssDecode`、`cmdLine`、`utf8toUnicode`、`escapeSeqDecode`、`trim`、`trimLeft`、`trimRight`、`compressWhitespace`、`removeWhitespace`、`removeNulls`、`replaceComments`、`removeCommentsChar`、`normalizePath`、`normalizePathWin`、`length`、`sha1`、`hexEncode`、`base64Decode` |
-| 动作 | `id`、`phase`、`deny`、`block`、`pass`、`allow`、`status`、`log`/`nolog`、`msg`、`severity`、`tag`、`rev`、`ver`、`logdata`、`t`、`chain`、`setvar`、`capture`、`skipAfter`、`initcol`、`ctl` 子集 |
+| 动作 | `id`、`phase`、`deny`、`block`、`pass`、`allow`、`status`、`log`/`nolog`、`msg`、`severity`、`tag`、`rev`、`ver`、`logdata`、`t`、`chain`、`setvar`、`capture`、`multiMatch`、`skipAfter`、`initcol`、`ctl` 子集 |
 | TX/宏 | `tx.` 集合、`setvar` 赋值/增减/删除、`TX:0..9`、`%{tx.name}`、`%{MATCHED_VAR}`、`%{MATCHED_VAR_NAME}`、`%{REMOTE_ADDR}` |
 
 ### `ctl` 子集
@@ -33,9 +34,12 @@ aegis-waf v0.1 不声称完整兼容 OWASP CRS。引擎实现了下表列出的�
 - `ctl:ruleEngine=Off|On|DetectionOnly`（DetectionOnly 当前不拦截）
 - `ctl:ruleRemoveById=<id>`
 - `ctl:ruleRemoveByTag=<tag>`
+- `ctl:requestBodyProcessor=URLENCODED|MULTIPART|JSON|XML`
+- `ctl:forceRequestBodyVariable=On|Off`（接受为 no-op；`REQUEST_BODY` 始终可用）
+- `ctl:ruleRemoveTargetById=<id>;<VAR>[:selector]`
+- `ctl:ruleRemoveTargetByTag=<tag>;<VAR>[:selector]`
 
-其他 `ctl`（`requestBodyProcessor`、`forceRequestBodyVariable`、`ruleRemoveTargetByTag` 等）
-在宽松模式下会被忽略。
+其他 `ctl` 在宽松模式下会被忽略。
 
 ## 语义说明
 
@@ -50,13 +54,27 @@ aegis-waf v0.1 不声称完整兼容 OWASP CRS。引擎实现了下表列出的�
   - 宽松模式下链中规则被跳过时，整条不完整链会被丢弃。
 - `skipAfter:<label>` 会跳过当前阶段后续规则，直到 `SecMarker` 标记之后。
 - `capture` 把正则捕获组写入 `TX:0..9`，并设置 `MATCHED_VAR` / `MATCHED_VAR_NAME`。
-- `MATCHED_VARS` 当前返回上一规则匹配的变量名（简化实现）。
+- `MATCHED_VARS` 返回本次事务所有命中值；`MATCHED_VAR_NAME` 带集合键（如 `ARGS:foo`）。
+- 变量选择器支持字面量与 `/regex/`；字面量大小写不敏感，正则按模式区分大小写。
+- `!VARIABLE[:selector]` 按变量项名称排除；无选择器时排除整个变量族。
+- `&VARIABLE[:selector]` 返回条目数，例如 `&TX:flag`、`&ARGS`、
+  `&MULTIPART_PART_HEADERS:_charset_`。
+- `multiMatch` 对每个命中执行一次非破坏性动作（`setvar` 按命中次数累计），
+  每条规则只记录一条审计，破坏性动作只执行一次。
+- `ruleRemoveTargetById/Tag` 在事务内排除指定规则/标签的变量项。
 - `@pm` / `@pmFromFile` 是大小写不敏感匹配；`@pmFromFile` 的相对路径以规则文件所在目录为基准，
   忽略空行与 `#` 注释行。
 - `@detectSQLi` / `@detectXSS` 使用纯 Rust 的 `barbacane-libinjection`
   （crate 名 `libinjectionrs`，对 C 版做过差分测试）。
 - `FILES` 系列变量使用内置 multipart/form-data 解析器；支持文件内容、字段名、大小与总大小，
   `FILES_TMPNAMES` 为空（不落临时文件）。
+- `MULTIPART_PART_HEADERS` 以 part 字段名为键，值为原始头行；`&` 计数返回头行数。
+- 请求体处理器由 `Content-Type` 推导（URLENCODED/MULTIPART/JSON/XML），
+  可被 `ctl:requestBodyProcessor` 覆盖；无 `Content-Type` 时默认 URLENCODED。
+  仅 URLENCODED 与 MULTIPART 的非文件字段进入 `ARGS_POST`；JSON/XML 不产生 `ARGS_POST`。
+- `@validateByteRange`、`@validateUtf8Encoding`、`@validateUrlEncoding`
+  均在“校验失败”时匹配；`@validateUtf8Encoding` 通过 U+FFFD 近似检测非法 UTF-8。
+- `@gt/@ge/@lt/@le` 的参数支持 `%{tx.name}` 等宏，在求值时展开。
 - XML 变量使用 `roxmltree` 提取所有元素文本和属性值；复杂 XPath 选择器未实现，
   `XML:selector` 当前按全量匹配处理。
 - 持久化集合使用内存 `MemoryCollectionStore`，跨请求保留；无过期时间、无 Redis 后端。
@@ -69,8 +87,7 @@ aegis-waf v0.1 不声称完整兼容 OWASP CRS。引擎实现了下表列出的�
 - `t:none` 清除默认动作继承的变换以及此前声明的变换。
 - `t:utf8toUnicode` 把非 ASCII 字符转换为 `%uXXXX`（超出 BMP 的字符使用 UTF-16 代理对），
   通常与后续 `t:urlDecodeUni` 配合使用。
-- 变量取反当前按“值”排除，而不是按集合项排除。
-- 数值算子只接受十进制整数。
+- 数值算子接受十进制整数或 `%{...}` 宏；宏展开后仍不是整数时按不匹配处理。
 - 正则使用 Rust `regex`：不支持 lookaround、backreference 等 PCRE 特性。
 - `(?i)` 等无安全 AC 字面量的 regex 使用预编译 RegexSet 预筛；同一变换变体内模式数
   ≥ 8 时启用，小集合逐条求值（性能取舍）。
@@ -89,24 +106,29 @@ aegis-waf v0.1 不声称完整兼容 OWASP CRS。引擎实现了下表列出的�
 - Phase 5 日志规则与 `skipAfter`/`SecMarker`
 - `ctl` 规则移除与审计关闭
 - `initcol` + `IP` 持久化计数
+- 变量计数与正则选择器（`&ARGS`、`REQUEST_COOKIES:/^_ga/`、`!ARGS_NAMES:/.../`）
+- multipart 分部头检测（`MULTIPART_PART_HEADERS`）
+- 宏参数异常评分拦截（`@ge %{tx.inbound_anomaly_score_threshold}`）
+- `multiMatch` 按命中次数累计异常评分
+- `ctl:requestBodyProcessor` 与 `ruleRemoveTarget*`
 
 这些模式在 `rules/examples/base.conf`、`crates/aegis-engine/src/eval.rs` 的测试、
 `crates/aegis-proxy/tests/proxy_response_integration.rs` 中有可执行示例。
 
 ## 已知不兼容
 
-- 完整 OWASP CRS：未实现全部变量、算子、动作和语义
-- `multimatch`
-- 变量计数（`&ARGS`）、集合排除正则
-- 大部分 `ctl`：`requestBodyProcessor`、`forceRequestBodyVariable`、
-  `ruleRemoveTargetById/Tag` 等
+- 完整 OWASP CRS：规则可编译，但部分语义仍是近似实现
 - 持久化集合的过期/淘汰、Redis 后端
-- 完整 XPath/XML 选择器
-- `MATCHED_VARS` 的完整多变量语义（当前简化为单个变量名）
+- 完整 XPath/XML 选择器；`XML` 选择器当前不过滤，返回全部 XML 值
 - lookaround、backreference 等 PCRE 特性
 - chunked/超大响应体的 Phase 4 检测
 - 响应压缩内容的解压后检测
 - Lua、GeoIP、WASM 插件（v0.1 运行时）
+- `@validateUtf8Encoding` 通过 U+FFFD 近似检测非法 UTF-8
+- `multiMatch` 每条规则只记录一条审计
+- `ctl:forceRequestBodyVariable` 为 no-op；`requestBodyProcessor`
+  只影响其后的 `set_body`（因此应位于 Phase 1）
+- 未知 `ctl` 在宽松模式下忽略，不报错
 - PHP/Python 等语言特定规则中依赖上述能力的部分
 
 ## 验证方式
