@@ -711,8 +711,13 @@ fn parse_cookies(value: &str) -> Vec<(String, String)> {
         .split(';')
         .filter_map(|item| {
             let item = item.trim();
-            let (name, value) = item.split_once('=')?;
-            Some((name.trim().to_string(), value.trim().to_string()))
+            if item.is_empty() {
+                return None;
+            }
+            Some(match item.split_once('=') {
+                Some((name, value)) => (name.trim().to_string(), value.trim().to_string()),
+                None => (item.to_string(), String::new()),
+            })
         })
         .collect()
 }
