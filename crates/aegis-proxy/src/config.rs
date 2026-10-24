@@ -46,6 +46,14 @@ pub struct RulesConfig {
     pub lenient: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResponseBodyLimitAction {
+    #[default]
+    Reject,
+    Pass,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LimitsConfig {
@@ -57,6 +65,18 @@ pub struct LimitsConfig {
     pub max_body_bytes: usize,
     #[serde(default = "default_max_response_body_bytes")]
     pub max_response_body_bytes: usize,
+    #[serde(default)]
+    pub response_body_limit_action: ResponseBodyLimitAction,
+    #[serde(default = "default_max_args")]
+    pub max_args: usize,
+    #[serde(default = "default_max_multipart_parts")]
+    pub max_multipart_parts: usize,
+    #[serde(default = "default_max_multipart_part_headers")]
+    pub max_multipart_part_headers: usize,
+    #[serde(default = "default_max_xml_depth")]
+    pub max_xml_depth: usize,
+    #[serde(default = "default_max_xml_values")]
+    pub max_xml_values: usize,
     #[serde(default = "default_header_read_timeout_ms")]
     pub header_read_timeout_ms: u64,
     #[serde(default = "default_body_read_timeout_ms")]
@@ -133,6 +153,26 @@ fn default_max_body_bytes() -> usize {
 
 fn default_max_response_body_bytes() -> usize {
     1048576
+}
+
+fn default_max_args() -> usize {
+    10_000
+}
+
+fn default_max_multipart_parts() -> usize {
+    1_000
+}
+
+fn default_max_multipart_part_headers() -> usize {
+    64
+}
+
+fn default_max_xml_depth() -> usize {
+    64
+}
+
+fn default_max_xml_values() -> usize {
+    10_000
 }
 
 fn default_header_read_timeout_ms() -> u64 {
@@ -285,6 +325,17 @@ impl Config {
                 "limits.max_response_body_bytes",
                 self.limits.max_response_body_bytes,
             ),
+            ("limits.max_args", self.limits.max_args),
+            (
+                "limits.max_multipart_parts",
+                self.limits.max_multipart_parts,
+            ),
+            (
+                "limits.max_multipart_part_headers",
+                self.limits.max_multipart_part_headers,
+            ),
+            ("limits.max_xml_depth", self.limits.max_xml_depth),
+            ("limits.max_xml_values", self.limits.max_xml_values),
             (
                 "limits.header_read_timeout_ms",
                 self.limits.header_read_timeout_ms as usize,
@@ -368,6 +419,12 @@ limits:
   max_header_bytes: 65536
   max_uri_bytes: 8192
   max_body_bytes: 1048576
+  response_body_limit_action: reject
+  max_args: 10000
+  max_multipart_parts: 1000
+  max_multipart_part_headers: 64
+  max_xml_depth: 64
+  max_xml_values: 10000
   header_read_timeout_ms: 10000
   body_read_timeout_ms: 15000
 on_error: block
@@ -429,6 +486,46 @@ audit:
         assert_eq!(config.on_error, OnError::Block);
         assert_eq!(config.audit.mode, AuditMode::BlockedOnly);
         assert_eq!(config.audit.queue_capacity, 8192);
+    }
+
+    #[test]
+    fn defaults_response_and_parse_limits() {
+        let yaml = r#"
+listen: "127.0.0.1:8080"
+upstream:
+  url: "http://127.0.0.1:3000"
+admin:
+  listen: "127.0.0.1:9001"
+rules:
+  files: ["rules/*.conf"]
+limits: {}
+audit:
+  sink: none
+"#;
+        let (_dir, path) = write_config(yaml);
+        let config = Config::load(&path).unwrap();
+        assert_eq!(
+            config.limits.response_body_limit_action,
+            ResponseBodyLimitAction::Reject
+        );
+        assert_eq!(config.limits.max_args, 10000);
+        assert_eq!(config.limits.max_multipart_parts, 1000);
+        assert_eq!(config.limits.max_multipart_part_headers, 64);
+        assert_eq!(config.limits.max_xml_depth, 64);
+        assert_eq!(config.limits.max_xml_values, 10000);
+    }
+
+    #[test]
+    fn rejects_unknown_response_body_limit_action() {
+        let yaml = FULL_CONFIG.replace(
+            "response_body_limit_action: reject",
+            "response_body_limit_action: ignore",
+        );
+        let (_dir, path) = write_config(&yaml);
+        assert!(matches!(
+            Config::load(&path),
+            Err(ConfigError::Parse { .. })
+        ));
     }
 
     #[test]
