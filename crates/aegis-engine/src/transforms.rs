@@ -153,7 +153,7 @@ fn compress_whitespace(input: &str) -> Cow<'_, str> {
 }
 
 fn url_decode(input: &str, uni: bool) -> Cow<'_, str> {
-    if !input.contains('%') && !input.contains('+') {
+    if !input.contains('%') && !input.contains('+') && (!uni || input.is_ascii()) {
         return Cow::Borrowed(input);
     }
     let bytes = input.as_bytes();
@@ -179,6 +179,13 @@ fn url_decode(input: &str, uni: bool) -> Cow<'_, str> {
                         _ => None,
                     };
                     if let Some(ch) = code.and_then(char::from_u32) {
+                        if uni {
+                            if let Some(fitted) = best_fit_char(ch) {
+                                output.push(fitted as u8);
+                                index += 6;
+                                continue;
+                            }
+                        }
                         let mut buffer = [0u8; 4];
                         output.extend_from_slice(ch.encode_utf8(&mut buffer).as_bytes());
                         index += 6;
@@ -202,7 +209,31 @@ fn url_decode(input: &str, uni: bool) -> Cow<'_, str> {
             }
         }
     }
+    if uni {
+        let text = String::from_utf8_lossy(&output);
+        if text.chars().any(|ch| !ch.is_ascii()) {
+            return Cow::Owned(
+                text.chars()
+                    .map(|ch| best_fit_char(ch).unwrap_or(ch))
+                    .collect(),
+            );
+        }
+    }
     Cow::Owned(String::from_utf8_lossy(&output).into_owned())
+}
+
+fn best_fit_char(ch: char) -> Option<char> {
+    if ('\u{FF01}'..='\u{FF5E}').contains(&ch) {
+        return char::from_u32(ch as u32 - 0xFEE0);
+    }
+    Some(match ch {
+        '\u{00B4}' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
+        '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
+        '\u{2039}' | '\u{00AB}' => '<',
+        '\u{203A}' | '\u{00BB}' => '>',
+        '\u{00A0}' => ' ',
+        _ => return None,
+    })
 }
 
 fn hex_nibble(byte: u8) -> Option<u8> {
@@ -508,6 +539,17 @@ mod tests {
             let twice = Transform::NormalizePath.apply(&once).into_owned();
             prop_assert_eq!(once, twice);
         }
+    }
+
+    #[test]
+    fn url_decode_uni_applies_best_fit_mapping() {
+        assert_eq!(Transform::UrlDecodeUni.apply("%u2019"), "'");
+        assert_eq!(
+            Transform::UrlDecodeUni.apply("%uff1cscript%uff1e"),
+            "<script>"
+        );
+        assert_eq!(Transform::UrlDecodeUni.apply("%u203a"), ">");
+        assert_eq!(Transform::UrlDecodeUni.apply("\u{2019}"), "'");
     }
 
     #[test]
