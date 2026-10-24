@@ -54,6 +54,7 @@ struct ParsedActions {
     logdata: Option<String>,
     chain: bool,
     capture: bool,
+    multi_match: bool,
     skip_after: Option<String>,
     ctl: Vec<CtlAction>,
     init_collections: Vec<(String, String)>,
@@ -286,6 +287,7 @@ fn compile_directives(
                     || parsed.logdata.is_some()
                     || parsed.chain
                     || parsed.capture
+                    || parsed.multi_match
                     || parsed.skip_after.is_some()
                     || !parsed.ctl.is_empty()
                     || !parsed.init_collections.is_empty()
@@ -439,6 +441,7 @@ fn compile_rule(
             logdata: parsed.logdata,
             chain: parsed.chain,
             capture: parsed.capture,
+            multi_match: parsed.multi_match,
             skip_after: parsed.skip_after,
             ctl: parsed.ctl,
             init_collections: parsed.init_collections,
@@ -499,6 +502,7 @@ fn compile_action(
             logdata: parsed.logdata,
             chain: false,
             capture: parsed.capture,
+            multi_match: parsed.multi_match,
             skip_after: parsed.skip_after,
             ctl: parsed.ctl,
             init_collections: parsed.init_collections,
@@ -1358,6 +1362,17 @@ fn parse_actions(
                     ));
                 }
                 parsed.capture = true;
+            }
+            "multimatch" => {
+                if value.is_some() {
+                    return Err(compile_error(
+                        file,
+                        line,
+                        column,
+                        "multiMatch does not accept a value".to_string(),
+                    ));
+                }
+                parsed.multi_match = true;
             }
             "skipafter" => {
                 let label = value.ok_or_else(|| {

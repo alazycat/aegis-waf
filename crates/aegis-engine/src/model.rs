@@ -365,6 +365,7 @@ pub struct CompiledActions {
     pub logdata: Option<String>,
     pub chain: bool,
     pub capture: bool,
+    pub multi_match: bool,
     pub skip_after: Option<String>,
     pub ctl: Vec<CtlAction>,
     pub init_collections: Vec<(String, String)>,
