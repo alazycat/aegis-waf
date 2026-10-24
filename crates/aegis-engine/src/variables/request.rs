@@ -291,7 +291,11 @@ impl RequestContext {
                 self.xml_values = extract_xml_values(&self.body_text, &self.parse_limits)?;
                 Ok(())
             }
-            BodyProcessor::Json | BodyProcessor::None => Ok(()),
+            BodyProcessor::Json => {
+                self.body_pairs = parse_json_pairs(body, &self.parse_limits)?;
+                Ok(())
+            }
+            BodyProcessor::None => Ok(()),
         };
         self.cache.borrow_mut().clear();
         result
@@ -762,6 +766,70 @@ fn derive_body_processor(headers: &[(String, String)]) -> BodyProcessor {
     } else {
         BodyProcessor::None
     }
+}
+
+fn parse_json_pairs(
+    body: &[u8],
+    limits: &ParseLimits,
+) -> Result<Vec<(String, String)>, BodyParseError> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Ok(Vec::new());
+    };
+    let mut pairs = Vec::new();
+    flatten_json("", &value, &mut pairs, limits)?;
+    Ok(pairs)
+}
+
+fn flatten_json(
+    prefix: &str,
+    value: &serde_json::Value,
+    pairs: &mut Vec<(String, String)>,
+    limits: &ParseLimits,
+) -> Result<(), BodyParseError> {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let name = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                flatten_json(&name, child, pairs, limits)?;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                let name = if prefix.is_empty() {
+                    index.to_string()
+                } else {
+                    format!("{prefix}.{index}")
+                };
+                flatten_json(&name, child, pairs, limits)?;
+            }
+        }
+        serde_json::Value::String(text) => push_json_pair(prefix, text, pairs, limits)?,
+        serde_json::Value::Number(number) => {
+            push_json_pair(prefix, &number.to_string(), pairs, limits)?;
+        }
+        serde_json::Value::Bool(flag) => {
+            push_json_pair(prefix, if *flag { "true" } else { "false" }, pairs, limits)?;
+        }
+        serde_json::Value::Null => push_json_pair(prefix, "", pairs, limits)?,
+    }
+    Ok(())
+}
+
+fn push_json_pair(
+    name: &str,
+    value: &str,
+    pairs: &mut Vec<(String, String)>,
+    limits: &ParseLimits,
+) -> Result<(), BodyParseError> {
+    if pairs.len() >= limits.max_args {
+        return Err(BodyParseError::TooManyArgs);
+    }
+    pairs.push((name.to_string(), value.to_string()));
+    Ok(())
 }
 
 fn decode_path(path: &str) -> String {
@@ -1316,7 +1384,7 @@ mod tests {
         let mut context = context(&headers);
         context.set_body(b"{\"a\":1}").unwrap();
         assert_eq!(context.body_processor(), BodyProcessor::Json);
-        assert!(extract(&context, Variable::ArgsPost(None)).is_empty());
+        assert_eq!(extract(&context, Variable::ArgsPost(None)), vec!["1"]);
         assert_eq!(extract(&context, Variable::RequestBody), vec!["{\"a\":1}"]);
         assert_eq!(extract(&context, Variable::ReqbodyProcessor), vec!["JSON"]);
     }
@@ -1494,13 +1562,16 @@ mod tests {
     }
 
     #[test]
-    fn json_body_ignores_parse_limits() {
+    fn json_body_respects_max_args() {
         let headers = header_map(&[("content-type", "application/json")]);
         let mut context = context(&headers);
         context.set_parse_limits(ParseLimits {
             max_args: 1,
             ..ParseLimits::default()
         });
-        assert!(context.set_body(b"{\"a\":1,\"b\":2}").is_ok());
+        assert_eq!(
+            context.set_body(b"{\"a\":1,\"b\":2}"),
+            Err(BodyParseError::TooManyArgs)
+        );
     }
 }
