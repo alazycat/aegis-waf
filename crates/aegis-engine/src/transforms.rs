@@ -211,7 +211,7 @@ fn url_decode(input: &str, uni: bool) -> Cow<'_, str> {
     }
     if uni {
         let text = String::from_utf8_lossy(&output);
-        if text.chars().any(|ch| !ch.is_ascii()) {
+        if !text.is_ascii() {
             return Cow::Owned(
                 text.chars()
                     .map(|ch| best_fit_char(ch).unwrap_or(ch))
