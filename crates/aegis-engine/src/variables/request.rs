@@ -249,10 +249,7 @@ impl RequestContext {
         self.body_processor = self
             .body_processor_override
             .unwrap_or_else(|| derive_body_processor(&self.headers));
-        self.body_available = !matches!(
-            self.body_processor,
-            BodyProcessor::Xml | BodyProcessor::Json
-        );
+        self.body_available = !matches!(self.body_processor, BodyProcessor::Xml);
         self.body_pairs = Vec::new();
         self.multipart_parts = Vec::new();
         self.xml_values = Vec::new();
@@ -1252,7 +1249,7 @@ mod tests {
         context.set_body(b"{\"a\":1}").unwrap();
         assert_eq!(context.body_processor(), BodyProcessor::Json);
         assert!(extract(&context, Variable::ArgsPost(None)).is_empty());
-        assert!(extract(&context, Variable::RequestBody).is_empty());
+        assert_eq!(extract(&context, Variable::RequestBody), vec!["{\"a\":1}"]);
         assert_eq!(extract(&context, Variable::ReqbodyProcessor), vec!["JSON"]);
     }
 
