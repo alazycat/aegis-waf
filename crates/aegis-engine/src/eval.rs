@@ -454,39 +454,40 @@ impl EvaluationState {
     }
 
     fn apply_setvar(&mut self, setvar: &SetVar) {
+        let name = self.expand_template(&setvar.name);
         let collection = match setvar.scope {
             SetVarScope::Tx => {
                 match &setvar.op {
                     SetVarOp::Assign(template) => {
                         let value = self.expand_template(template);
-                        self.context.tx_mut().set(&setvar.name, value);
+                        self.context.tx_mut().set(&name, value);
                     }
                     SetVarOp::Add(template) => {
                         let delta = macro_integer(template, &self.context);
                         let current = self
                             .context
                             .tx()
-                            .get(&setvar.name)
+                            .get(&name)
                             .and_then(|value| value.parse::<i64>().ok())
                             .unwrap_or(0);
                         self.context
                             .tx_mut()
-                            .set(&setvar.name, (current + delta).to_string());
+                            .set(&name, (current + delta).to_string());
                     }
                     SetVarOp::Sub(template) => {
                         let delta = macro_integer(template, &self.context);
                         let current = self
                             .context
                             .tx()
-                            .get(&setvar.name)
+                            .get(&name)
                             .and_then(|value| value.parse::<i64>().ok())
                             .unwrap_or(0);
                         self.context
                             .tx_mut()
-                            .set(&setvar.name, (current - delta).to_string());
+                            .set(&name, (current - delta).to_string());
                     }
                     SetVarOp::Delete => {
-                        self.context.tx_mut().remove(&setvar.name);
+                        self.context.tx_mut().remove(&name);
                     }
                 }
                 return;
@@ -500,36 +501,30 @@ impl EvaluationState {
         match &setvar.op {
             SetVarOp::Assign(template) => {
                 let value = self.expand_template(template);
-                self.context.collection_set(collection, &setvar.name, value);
+                self.context.collection_set(collection, &name, value);
             }
             SetVarOp::Add(template) => {
                 let delta = macro_integer(template, &self.context);
                 let current = self
                     .context
-                    .collection_get(collection, &setvar.name)
+                    .collection_get(collection, &name)
                     .and_then(|value| value.parse::<i64>().ok())
                     .unwrap_or(0);
-                self.context.collection_set(
-                    collection,
-                    &setvar.name,
-                    (current + delta).to_string(),
-                );
+                self.context
+                    .collection_set(collection, &name, (current + delta).to_string());
             }
             SetVarOp::Sub(template) => {
                 let delta = macro_integer(template, &self.context);
                 let current = self
                     .context
-                    .collection_get(collection, &setvar.name)
+                    .collection_get(collection, &name)
                     .and_then(|value| value.parse::<i64>().ok())
                     .unwrap_or(0);
-                self.context.collection_set(
-                    collection,
-                    &setvar.name,
-                    (current - delta).to_string(),
-                );
+                self.context
+                    .collection_set(collection, &name, (current - delta).to_string());
             }
             SetVarOp::Delete => {
-                self.context.collection_remove(collection, &setvar.name);
+                self.context.collection_remove(collection, &name);
             }
         }
     }
@@ -1173,6 +1168,22 @@ SecRule ARGS "@contains attack" "id:3,phase:1,deny,status:403"
             blocked.decision,
             Decision::Block { rule_id: 3, .. }
         ));
+    }
+
+    #[test]
+    fn setvar_name_expands_macros() {
+        let rules = load(
+            r#"
+SecAction "id:1,phase:1,pass,nolog,setvar:'tx.counter=1',setvar:'tx.item_%{tx.counter}=hello'"
+SecRule TX:item_1 "@streq hello" "id:2,phase:1,deny,status:403"
+"#,
+        );
+        let evaluation = eval(&rules, "GET", "/", &[], b"");
+        assert!(
+            matches!(evaluation.decision, Decision::Block { rule_id: 2, .. }),
+            "unexpected decision: {:?}",
+            evaluation.decision
+        );
     }
 
     #[test]
