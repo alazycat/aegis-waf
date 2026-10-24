@@ -1176,6 +1176,23 @@ SecRule ARGS "@contains attack" "id:3,phase:1,deny,status:403"
     }
 
     #[test]
+    fn negated_within_expands_macro() {
+        let rules = load(
+            r#"
+SecAction "id:1,phase:1,pass,nolog,setvar:'tx.allowed_methods=GET HEAD POST OPTIONS'"
+SecRule REQUEST_METHOD "!@within %{tx.allowed_methods}" "id:2,phase:1,deny,status:405"
+"#,
+        );
+        let allowed = eval(&rules, "GET", "/", &[], b"");
+        assert_eq!(allowed.decision, Decision::Pass);
+        let denied = eval(&rules, "TEST", "/", &[], b"");
+        assert!(matches!(
+            denied.decision,
+            Decision::Block { rule_id: 2, .. }
+        ));
+    }
+
+    #[test]
     fn ctl_removes_rule_by_id_range() {
         let rules = load(
             r#"

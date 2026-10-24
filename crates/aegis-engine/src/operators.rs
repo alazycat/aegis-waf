@@ -47,10 +47,10 @@ impl CompiledOperator {
     pub fn matches_with<F: Fn(&str) -> String>(&self, input: &str, expand: &F) -> bool {
         match self {
             Self::Rx(regex) => regex.is_match(input),
-            Self::Eq(expected) => input == expected,
-            Self::Contains(needle) => input.contains(needle),
-            Self::BeginsWith(prefix) => input.starts_with(prefix),
-            Self::EndsWith(suffix) => input.ends_with(suffix),
+            Self::Eq(expected) => input == resolve_arg(expected, expand).as_ref(),
+            Self::Contains(needle) => input.contains(resolve_arg(needle, expand).as_ref()),
+            Self::BeginsWith(prefix) => input.starts_with(resolve_arg(prefix, expand).as_ref()),
+            Self::EndsWith(suffix) => input.ends_with(resolve_arg(suffix, expand).as_ref()),
             Self::Pm(phrases) => {
                 let haystack = input.to_ascii_lowercase();
                 phrases.iter().any(|phrase| haystack.contains(phrase))
@@ -59,7 +59,7 @@ impl CompiledOperator {
                 .parse::<IpAddr>()
                 .map(|address| networks.iter().any(|network| network.contains(&address)))
                 .unwrap_or(false),
-            Self::Within(haystack) => haystack.contains(input),
+            Self::Within(haystack) => resolve_arg(haystack, expand).contains(input),
             Self::Gt(value) => {
                 compare_numbers(input, value, expand, |number, limit| number > limit)
             }
@@ -107,6 +107,14 @@ fn invalid_url_encoding(input: &str) -> bool {
 
 fn parse_number(input: &str) -> Option<i64> {
     input.trim().parse::<i64>().ok()
+}
+
+fn resolve_arg<'a, F: Fn(&str) -> String>(arg: &'a str, expand: &F) -> std::borrow::Cow<'a, str> {
+    if arg.contains("%{") {
+        std::borrow::Cow::Owned(expand(arg))
+    } else {
+        std::borrow::Cow::Borrowed(arg)
+    }
 }
 
 fn compare_numbers<F: Fn(&str) -> String>(
