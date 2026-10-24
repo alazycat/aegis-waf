@@ -28,6 +28,7 @@ pub struct AuditEvent {
 pub struct MatchedRule {
     pub id: u32,
     pub msg: Option<String>,
+    pub logdata: Option<String>,
     pub severity: Option<String>,
     pub tags: Vec<String>,
 }
@@ -61,6 +62,7 @@ mod tests {
             matched_rules: vec![MatchedRule {
                 id: 942100,
                 msg: Some("SQL Injection Attack Detected".to_string()),
+                logdata: Some("Matched Data: x found within ARGS:q".to_string()),
                 severity: Some("CRITICAL".to_string()),
                 tags: vec!["attack-sqli".to_string()],
             }],

@@ -106,6 +106,7 @@ pub fn build_event(input: EventInput<'_>) -> AuditEvent {
         .map(|rule| MatchedRule {
             id: rule.id,
             msg: rule.msg.clone(),
+            logdata: rule.logdata.clone(),
             severity: rule.severity.clone(),
             tags: rule.tags.clone(),
         })
