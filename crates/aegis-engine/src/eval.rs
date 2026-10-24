@@ -175,19 +175,11 @@ impl EvaluationState {
                     let keep_from = self.context.matched_entry_len();
                     let hits = self.rule_hits(rule, true);
                     if !hits.is_empty() {
-                        if rule.actions.multi_match {
-                            for hit in &hits {
-                                self.apply_hit_context(rule, hit);
-                                self.apply_non_disruptive_actions(rule);
-                            }
-                            self.record_rule_match(rule);
-                        } else {
-                            for hit in &hits {
-                                self.apply_hit_context(rule, hit);
-                            }
+                        for hit in &hits {
+                            self.apply_hit_context(rule, hit);
                             self.apply_non_disruptive_actions(rule);
-                            self.record_rule_match(rule);
                         }
+                        self.record_rule_match(rule);
                         self.context.drop_matched_entries_before(keep_from);
                         self.apply_disruptive(rule);
                         self.apply_skip_after(rules, rule);
@@ -1183,6 +1175,22 @@ SecRule REQUEST_HEADERS:Content-Type "@contains application/ld+json" "id:2,phase
         let ids: Vec<u32> = evaluation.matched.iter().map(|rule| rule.id).collect();
         assert!(ids.contains(&1), "short needle was skipped: {ids:?}");
         assert!(ids.contains(&2), "long needle was skipped: {ids:?}");
+    }
+
+    #[test]
+    fn actions_run_for_each_standalone_hit() {
+        let rules = load(
+            r#"
+SecRule ARGS_NAMES "@rx ." "id:1,phase:1,pass,setvar:'tx.c_%{MATCHED_VAR_NAME}=+1'"
+SecRule TX:/^c_/ "@gt 1" "id:2,phase:1,deny,status:403"
+"#,
+        );
+        let evaluation = eval(&rules, "GET", "/?a=1&a=2", &[], b"");
+        assert!(
+            matches!(evaluation.decision, Decision::Block { rule_id: 2, .. }),
+            "per-hit setvar did not increment: {:?}",
+            evaluation.decision
+        );
     }
 
     #[test]
