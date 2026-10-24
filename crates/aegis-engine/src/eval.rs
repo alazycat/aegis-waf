@@ -202,13 +202,13 @@ impl EvaluationState {
                                 self.apply_hit_context(rule, hit);
                                 self.apply_non_disruptive_actions(rule);
                             }
-                            self.record_rule_match(rule);
                         } else {
                             self.apply_hit_context(rule, &hits[0]);
-                            self.apply_non_disruptive(rule);
+                            self.apply_non_disruptive_actions(rule);
                         }
                     }
                     if all_match {
+                        self.record_rule_match(&chain[0]);
                         for rule in chain {
                             self.apply_disruptive(rule);
                             if self.decision.is_decisive() {
@@ -1173,6 +1173,41 @@ SecRule ARGS "@contains attack" "id:3,phase:1,deny,status:403"
             blocked.decision,
             Decision::Block { rule_id: 3, .. }
         ));
+    }
+
+    #[test]
+    fn incomplete_chain_is_not_recorded() {
+        let rules = load(
+            r#"
+SecRule REQUEST_METHOD "@eq GET" "id:1,phase:1,pass,chain"
+    SecRule REQUEST_METHOD "@eq POST" "t:none"
+"#,
+        );
+        let evaluation = eval(&rules, "GET", "/", &[], b"");
+        assert!(
+            evaluation.matched.iter().all(|rule| rule.id != 1),
+            "incomplete chain was recorded: {:?}",
+            evaluation.matched
+        );
+    }
+
+    #[test]
+    fn complete_chain_records_head_once() {
+        let rules = load(
+            r#"
+SecRule REQUEST_METHOD "@eq GET" "id:1,phase:1,pass,chain"
+    SecRule REQUEST_METHOD "@eq GET" "t:none"
+"#,
+        );
+        let evaluation = eval(&rules, "GET", "/", &[], b"");
+        assert_eq!(
+            evaluation
+                .matched
+                .iter()
+                .filter(|rule| rule.id == 1)
+                .count(),
+            1
+        );
     }
 
     #[test]
