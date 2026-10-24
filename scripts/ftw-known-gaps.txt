@@ -1,0 +1,52 @@
+# Known go-ftw failures that are out of scope for the current iteration.
+# Format: <ruleId-testId> <reason>
+#
+# Requests rejected by hyper before WAF evaluation:
+920620-1 request is rejected by hyper before WAF evaluation (encoded_request)
+921120-1 request target contains raw characters rejected by hyper before WAF evaluation
+921120-2 request target contains raw characters rejected by hyper before WAF evaluation
+921210-1 request target contains raw characters rejected by hyper before WAF evaluation
+930110-8 request target contains raw characters rejected by hyper before WAF evaluation
+930110-12 request target contains raw characters rejected by hyper before WAF evaluation
+930120-9 request target contains raw characters rejected by hyper before WAF evaluation
+932236-21 request target contains raw characters rejected by hyper before WAF evaluation
+932240-9 request target contains raw characters rejected by hyper before WAF evaluation
+932240-14 request target contains raw characters rejected by hyper before WAF evaluation
+932240-15 request target contains raw characters rejected by hyper before WAF evaluation
+932250-5 request target contains raw characters rejected by hyper before WAF evaluation
+932260-28 request target contains raw characters rejected by hyper before WAF evaluation
+932371-1 request target contains raw characters rejected by hyper before WAF evaluation
+941100-1 request target contains raw characters rejected by hyper before WAF evaluation
+941110-2 request target contains raw characters rejected by hyper before WAF evaluation
+941160-1 request target contains raw characters rejected by hyper before WAF evaluation
+941240-2 request target contains raw characters rejected by hyper before WAF evaluation
+942130-9 request target contains raw characters rejected by hyper before WAF evaluation
+942500-1 request target contains raw characters rejected by hyper before WAF evaluation
+942500-2 request target contains raw characters rejected by hyper before WAF evaluation
+942511-1 request target contains raw characters rejected by hyper before WAF evaluation
+943100-1 request target contains raw characters rejected by hyper before WAF evaluation
+949110-1 request target contains raw characters rejected by hyper before WAF evaluation
+949110-5 request target contains raw characters rejected by hyper before WAF evaluation
+#
+# Non-UTF-8 request bytes:
+941310-1 non-UTF-8 request bytes are converted lossily before rule evaluation
+941310-3 non-UTF-8 request bytes are converted lossily before rule evaluation
+941310-12 non-UTF-8 request bytes are converted lossily before rule evaluation
+941310-13 non-UTF-8 request bytes are converted lossily before rule evaluation
+#
+# Protocol, transform and regex edge cases:
+920100-5 hyper normalizes or rejects this protocol edge case before WAF rules
+920100-8 hyper normalizes or rejects this protocol edge case before WAF rules
+920100-16 hyper normalizes or rejects this protocol edge case before WAF rules
+920270-4 hyper normalizes or rejects this protocol edge case before WAF rules
+920274-1 hyper normalizes or rejects this protocol edge case before WAF rules
+920290-1 hyper normalizes or rejects this protocol edge case before WAF rules
+920400-1 hyper normalizes or rejects this protocol edge case before WAF rules
+920430-5 hyper normalizes or rejects this protocol edge case before WAF rules
+920430-8 hyper normalizes or rejects this protocol edge case before WAF rules
+920610-2 hyper normalizes or rejects this protocol edge case before WAF rules
+920650-36 hyper normalizes or rejects this protocol edge case before WAF rules
+930110-11 cmdLine removes the backslash separator before the traversal regex runs
+932207-7 PCRE or transform edge case not covered by the Rust regex implementation
+942500-3 SQL comment/optimizer-hint transform edge case
+942500-4 SQL comment/optimizer-hint transform edge case
