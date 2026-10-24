@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::audit_sink;
 use crate::config::ResponseBodyLimitAction;
-use crate::proxy::response_body::is_event_stream;
+use crate::proxy::response_body::{decode_body, is_event_stream, DecodedBody};
 use crate::state::AppState;
 
 pub mod forward;
@@ -297,10 +297,31 @@ async fn process(
     } else {
         let timeout = Duration::from_millis(state.config.limits.body_read_timeout_ms);
         match limits::read_body_limited(response_body, max_body, timeout).await {
-            Ok(raw) => {
-                evaluation.set_response_body(&raw);
-                buffered_body = Some(raw);
-            }
+            Ok(raw) => match decode_body(&raw, &response_parts.headers, max_body) {
+                DecodedBody::Decoded(decoded) => {
+                    evaluation.set_response_body(&decoded);
+                    buffered_body = Some(raw);
+                }
+                DecodedBody::Unsupported => {
+                    evaluation.set_response_body(&raw);
+                    buffered_body = Some(raw);
+                }
+                DecodedBody::TooLarge => match limit_action {
+                    ResponseBodyLimitAction::Reject => {
+                        return local_after_upstream(
+                            StatusCode::BAD_GATEWAY,
+                            "upstream body too large\n",
+                            body_len,
+                            upstream_status,
+                            upstream_latency,
+                            "upstream_body_too_large",
+                        );
+                    }
+                    ResponseBodyLimitAction::Pass => {
+                        forward_body = Some(full_body(raw));
+                    }
+                },
+            },
             Err(limits::BodyError::TooLarge { prefix, rest }) => match limit_action {
                 ResponseBodyLimitAction::Reject => {
                     return local_after_upstream(

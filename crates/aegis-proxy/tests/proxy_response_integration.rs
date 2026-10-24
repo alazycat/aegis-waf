@@ -360,3 +360,169 @@ async fn event_stream_is_not_buffered() {
     assert_eq!(body.as_ref(), b"a secret event");
     harness.handle.abort();
 }
+
+fn gzip_body(data: &[u8]) -> Bytes {
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(data).unwrap();
+    Bytes::from(encoder.finish().unwrap())
+}
+
+fn deflate_body(data: &[u8]) -> Bytes {
+    use std::io::Write;
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(data).unwrap();
+    Bytes::from(encoder.finish().unwrap())
+}
+
+fn brotli_body(data: &[u8]) -> Bytes {
+    use std::io::Write;
+    let mut output = Vec::new();
+    {
+        let mut writer = brotli::CompressorWriter::new(&mut output, 4096, 5, 22);
+        writer.write_all(data).unwrap();
+    }
+    Bytes::from(output)
+}
+
+#[tokio::test]
+async fn gzip_response_is_inspected_after_decoding() {
+    let harness = harness_with_body(
+        r#"SecRule RESPONSE_BODY "@contains secret" "id:2,phase:4,deny,status:403""#,
+        StatusCode::OK,
+        vec![
+            ("content-type", "text/plain".to_string()),
+            ("content-encoding", "gzip".to_string()),
+        ],
+        TestBody::Full(gzip_body(b"a secret response")),
+        1048576,
+        ResponseBodyLimitAction::Reject,
+    )
+    .await;
+    let (status, _) = send(harness.proxy, get("http://example.test/")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    harness.handle.abort();
+}
+
+#[tokio::test]
+async fn deflate_response_is_inspected_after_decoding() {
+    let harness = harness_with_body(
+        r#"SecRule RESPONSE_BODY "@contains secret" "id:2,phase:4,deny,status:403""#,
+        StatusCode::OK,
+        vec![
+            ("content-type", "text/plain".to_string()),
+            ("content-encoding", "deflate".to_string()),
+        ],
+        TestBody::Full(deflate_body(b"a secret response")),
+        1048576,
+        ResponseBodyLimitAction::Reject,
+    )
+    .await;
+    let (status, _) = send(harness.proxy, get("http://example.test/")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    harness.handle.abort();
+}
+
+#[tokio::test]
+async fn brotli_response_is_inspected_after_decoding() {
+    let harness = harness_with_body(
+        r#"SecRule RESPONSE_BODY "@contains secret" "id:2,phase:4,deny,status:403""#,
+        StatusCode::OK,
+        vec![
+            ("content-type", "text/plain".to_string()),
+            ("content-encoding", "br".to_string()),
+        ],
+        TestBody::Full(brotli_body(b"a secret response")),
+        1048576,
+        ResponseBodyLimitAction::Reject,
+    )
+    .await;
+    let (status, _) = send(harness.proxy, get("http://example.test/")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    harness.handle.abort();
+}
+
+#[tokio::test]
+async fn gzip_body_over_decoded_limit_is_rejected() {
+    let plain = vec![b'a'; 4096];
+    let encoded = gzip_body(&plain);
+    assert!(encoded.len() < 64);
+    let harness = harness_with_body(
+        r#"SecRule RESPONSE_BODY "@contains never-match" "id:2,phase:4,pass""#,
+        StatusCode::OK,
+        vec![
+            ("content-type", "text/plain".to_string()),
+            ("content-encoding", "gzip".to_string()),
+        ],
+        TestBody::Full(encoded),
+        64,
+        ResponseBodyLimitAction::Reject,
+    )
+    .await;
+    let (status, _) = send(harness.proxy, get("http://example.test/")).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    harness.handle.abort();
+}
+
+#[tokio::test]
+async fn gzip_body_over_decoded_limit_passes_through_when_configured() {
+    let plain = vec![b'a'; 4096];
+    let encoded = gzip_body(&plain);
+    assert!(encoded.len() < 64);
+    let expected = encoded.clone();
+    let harness = harness_with_body(
+        r#"SecRule RESPONSE_BODY "@contains never-match" "id:2,phase:4,pass""#,
+        StatusCode::OK,
+        vec![
+            ("content-type", "text/plain".to_string()),
+            ("content-encoding", "gzip".to_string()),
+        ],
+        TestBody::Full(encoded),
+        64,
+        ResponseBodyLimitAction::Pass,
+    )
+    .await;
+    let (status, body) = send_bytes(harness.proxy, get("http://example.test/")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, expected);
+    harness.handle.abort();
+}
+
+#[tokio::test]
+async fn corrupt_gzip_is_forwarded() {
+    let harness = harness_with_body(
+        r#"SecRule RESPONSE_BODY "@contains secret" "id:2,phase:4,deny,status:403""#,
+        StatusCode::OK,
+        vec![
+            ("content-type", "text/plain".to_string()),
+            ("content-encoding", "gzip".to_string()),
+        ],
+        TestBody::Full(Bytes::from_static(b"not gzip data")),
+        1048576,
+        ResponseBodyLimitAction::Reject,
+    )
+    .await;
+    let (status, body) = send_bytes(harness.proxy, get("http://example.test/")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_ref(), b"not gzip data");
+    harness.handle.abort();
+}
+
+#[tokio::test]
+async fn unknown_content_encoding_is_inspected_as_raw() {
+    let harness = harness_with_body(
+        r#"SecRule RESPONSE_BODY "@contains secret" "id:2,phase:4,deny,status:403""#,
+        StatusCode::OK,
+        vec![
+            ("content-type", "text/plain".to_string()),
+            ("content-encoding", "zstd".to_string()),
+        ],
+        TestBody::Full(Bytes::from_static(b"a secret response")),
+        1048576,
+        ResponseBodyLimitAction::Reject,
+    )
+    .await;
+    let (status, _) = send(harness.proxy, get("http://example.test/")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    harness.handle.abort();
+}
