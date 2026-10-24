@@ -1078,6 +1078,8 @@ fn parse_operator(raw: &str, rule_file: &Path) -> Result<(CompiledOperator, bool
             CompiledOperator::Unconditional
         }
         "validatebyterange" => CompiledOperator::ByteRange(parse_byte_ranges(&argument)?),
+        "validateutf8encoding" => CompiledOperator::ValidateUtf8Encoding,
+        "validateurlencoding" => CompiledOperator::ValidateUrlEncoding,
         other => return Err(format!("unsupported operator @{other}")),
     };
     Ok((operator, negated))

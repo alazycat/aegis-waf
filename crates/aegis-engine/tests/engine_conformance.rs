@@ -109,3 +109,16 @@ fn rule_match_without_log_action_is_not_logged() {
     assert_eq!(evaluation.matched[0].id, 1);
     assert!(!evaluation.matched[0].log);
 }
+
+#[test]
+fn validate_byte_range_flags_invalid_bytes() {
+    let rules = load(r#"SecRule ARGS "@validateByteRange 32-126" "id:1,phase:1,deny""#);
+    let headers = headers(&[]);
+    let view = request(&headers, "GET", "/?q=hello", b"");
+    assert_eq!(evaluate(&rules, &view).decision, Decision::Pass);
+    let view = request(&headers, "GET", "/?q=hel%00lo", b"");
+    assert!(matches!(
+        evaluate(&rules, &view).decision,
+        Decision::Block { rule_id: 1, .. }
+    ));
+}

@@ -20,6 +20,8 @@ pub enum CompiledOperator {
     DetectXss,
     Unconditional,
     ByteRange(Vec<(u8, u8)>),
+    ValidateUtf8Encoding,
+    ValidateUrlEncoding,
 }
 
 impl CompiledOperator {
@@ -54,13 +56,34 @@ impl CompiledOperator {
             Self::DetectSqli => libinjectionrs::detect_sqli(input.as_bytes()).is_injection(),
             Self::DetectXss => libinjectionrs::detect_xss(input.as_bytes()).is_injection(),
             Self::Unconditional => true,
-            Self::ByteRange(ranges) => input.as_bytes().iter().all(|byte| {
+            Self::ByteRange(ranges) => !input.as_bytes().iter().all(|byte| {
                 ranges
                     .iter()
                     .any(|(start, end)| *start <= *byte && *byte <= *end)
             }),
+            Self::ValidateUtf8Encoding => input.contains('\u{FFFD}'),
+            Self::ValidateUrlEncoding => invalid_url_encoding(input),
         }
     }
+}
+
+fn invalid_url_encoding(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit()
+            {
+                return true;
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    false
 }
 
 fn parse_number(input: &str) -> Option<i64> {
@@ -127,11 +150,20 @@ mod tests {
     }
 
     #[test]
-    fn byte_range_and_unconditional_operators() {
+    fn byte_range_matches_invalid_bytes() {
         let printable = CompiledOperator::ByteRange(vec![(32, 126)]);
-        assert!(printable.matches("hello"));
-        assert!(!printable.matches("hel\0lo"));
+        assert!(!printable.matches("hello"));
+        assert!(printable.matches("hel\0lo"));
         assert!(CompiledOperator::Unconditional.matches(""));
         assert!(CompiledOperator::Unconditional.matches("anything"));
+    }
+
+    #[test]
+    fn validation_operators_match_invalid_input() {
+        assert!(!CompiledOperator::ValidateUtf8Encoding.matches("hello"));
+        assert!(CompiledOperator::ValidateUtf8Encoding.matches("hel\u{FFFD}lo"));
+        assert!(!CompiledOperator::ValidateUrlEncoding.matches("a%20b"));
+        assert!(CompiledOperator::ValidateUrlEncoding.matches("a%2"));
+        assert!(CompiledOperator::ValidateUrlEncoding.matches("a%zz"));
     }
 }
