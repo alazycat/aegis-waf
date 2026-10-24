@@ -1384,7 +1384,7 @@ fn parse_actions(
                 let raw_ctl = value.ok_or_else(|| {
                     compile_error(file, line, column, "ctl requires a value".to_string())
                 })?;
-                match parse_ctl(raw_ctl) {
+                match parse_ctl(raw_ctl, file, line, column, options) {
                     Ok(action) => parsed.ctl.push(action),
                     Err(message) => {
                         if options.lenient {
@@ -1458,7 +1458,13 @@ fn parse_actions(
     Ok(Some(parsed))
 }
 
-fn parse_ctl(raw: &str) -> Result<CtlAction, String> {
+fn parse_ctl(
+    raw: &str,
+    file: &Path,
+    line: usize,
+    column: usize,
+    options: &LoadOptions,
+) -> Result<CtlAction, String> {
     let (key, value) = raw
         .split_once('=')
         .ok_or_else(|| "ctl requires key=value".to_string())?;
@@ -1481,7 +1487,54 @@ fn parse_ctl(raw: &str) -> Result<CtlAction, String> {
             .map(CtlAction::RemoveRuleById)
             .map_err(|error| format!("invalid ruleRemoveById: {error}")),
         "ruleremovebytag" => Ok(CtlAction::RemoveRuleByTag(value)),
+        "requestbodyprocessor" => BodyProcessor::parse_name(&value)
+            .map(CtlAction::RequestBodyProcessor)
+            .ok_or_else(|| format!("unsupported requestBodyProcessor value {value}")),
+        "forcerequestbodyvariable" => match value.to_ascii_lowercase().as_str() {
+            "on" => Ok(CtlAction::ForceRequestBodyVariable(true)),
+            "off" => Ok(CtlAction::ForceRequestBodyVariable(false)),
+            other => Err(format!(
+                "unsupported forceRequestBodyVariable value {other}"
+            )),
+        },
+        "ruleremovetargetbyid" => {
+            let (id, target) = split_target(&value)?;
+            let id = id
+                .parse::<u32>()
+                .map_err(|error| format!("invalid rule id in ctl: {error}"))?;
+            let target = parse_target_variable(file, line, column, &target, options)?;
+            Ok(CtlAction::RemoveTargetById { id, target })
+        }
+        "ruleremovetargetbytag" => {
+            let (tag, target) = split_target(&value)?;
+            let target = parse_target_variable(file, line, column, &target, options)?;
+            Ok(CtlAction::RemoveTargetByTag {
+                tag: tag.to_string(),
+                target,
+            })
+        }
         other => Err(format!("unsupported ctl {other}")),
+    }
+}
+
+fn split_target(value: &str) -> Result<(&str, String), String> {
+    let (selector, target) = value
+        .split_once(';')
+        .ok_or_else(|| "target ctl requires id|tag;VARIABLE".to_string())?;
+    Ok((selector.trim(), target.trim().to_string()))
+}
+
+fn parse_target_variable(
+    file: &Path,
+    line: usize,
+    column: usize,
+    raw: &str,
+    options: &LoadOptions,
+) -> Result<Variable, String> {
+    match parse_variables(file, line, column, raw, options) {
+        Ok(Some(mut specs)) if specs.len() == 1 => Ok(specs.remove(0).variable),
+        Ok(_) => Err(format!("invalid target variable {raw}")),
+        Err(error) => Err(error.to_string()),
     }
 }
 

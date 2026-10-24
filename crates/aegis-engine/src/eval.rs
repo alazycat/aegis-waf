@@ -6,7 +6,7 @@ use crate::error::EngineError;
 use crate::model::{
     CompiledOperator, CompiledRule, CompiledRules, CtlAction, Disruptive, Phase, Prefilter,
     PrefilterHits, PrefilterVariant, RuleEngineMode, RuleGroup, SetVar, SetVarOp, SetVarScope,
-    VariableSpec,
+    Variable, VariableSpec,
 };
 use crate::variables::request::{RequestContext, RequestView, VariableEntry};
 use crate::variables::tx::expand_macros_with_remote;
@@ -58,6 +58,8 @@ pub struct EvaluationState {
     enforce: bool,
     removed_rule_ids: HashSet<u32>,
     removed_tags: HashSet<String>,
+    removed_targets_by_id: Vec<(u32, Variable)>,
+    removed_targets_by_tag: Vec<(String, Variable)>,
     skip_until: Option<usize>,
 }
 
@@ -78,6 +80,8 @@ impl EvaluationState {
             enforce: true,
             removed_rule_ids: HashSet::new(),
             removed_tags: HashSet::new(),
+            removed_targets_by_id: Vec::new(),
+            removed_targets_by_tag: Vec::new(),
             skip_until: None,
         }
     }
@@ -286,7 +290,8 @@ impl EvaluationState {
         spec: &VariableSpec,
         entry: &VariableEntry,
     ) -> bool {
-        rule.variables
+        let negated = rule
+            .variables
             .iter()
             .filter(|spec| spec.negated)
             .any(|negated| {
@@ -299,7 +304,21 @@ impl EvaluationState {
                             .map(|key| selector.matches(key))
                             .unwrap_or(false),
                     }
-            })
+            });
+        if negated {
+            return true;
+        }
+        self.removed_targets_by_id
+            .iter()
+            .filter(|(id, _)| *id == rule.id)
+            .map(|(_, target)| target)
+            .chain(
+                self.removed_targets_by_tag
+                    .iter()
+                    .filter(|(tag, _)| rule.actions.tags.contains(tag))
+                    .map(|(_, target)| target),
+            )
+            .any(|target| target_excluded(target, spec, entry))
     }
 
     fn apply_hit_context(&mut self, rule: &CompiledRule, hit: &RuleHit) {
@@ -384,6 +403,17 @@ impl EvaluationState {
             }
             CtlAction::RemoveRuleByTag(tag) => {
                 self.removed_tags.insert(tag.clone());
+            }
+            CtlAction::RequestBodyProcessor(processor) => {
+                self.context.set_body_processor_override(*processor);
+            }
+            CtlAction::ForceRequestBodyVariable(_) => {}
+            CtlAction::RemoveTargetById { id, target } => {
+                self.removed_targets_by_id.push((*id, target.clone()));
+            }
+            CtlAction::RemoveTargetByTag { tag, target } => {
+                self.removed_targets_by_tag
+                    .push((tag.clone(), target.clone()));
             }
         }
     }
@@ -492,6 +522,18 @@ impl EvaluationState {
             }
         }
     }
+}
+
+fn target_excluded(target: &Variable, spec: &VariableSpec, entry: &VariableEntry) -> bool {
+    target.same_family(&spec.variable)
+        && match target.selector() {
+            None => true,
+            Some(selector) => entry
+                .key
+                .as_deref()
+                .map(|key| selector.matches(key))
+                .unwrap_or(false),
+        }
 }
 
 fn macro_integer(template: &str, context: &RequestContext) -> i64 {
@@ -1304,6 +1346,51 @@ SecRule MATCHED_VARS "@contains ARGS" "id:9502,phase:1,deny,status:403"
             b"",
         );
         assert_eq!(names.decision, Decision::Pass);
+    }
+
+    #[test]
+    fn rule_remove_target_by_tag_skips_matching_variable() {
+        let rules = load(
+            r#"
+SecRule REQUEST_FILENAME "@contains admin" "id:4501,phase:1,pass,ctl:ruleRemoveTargetByTag=skip-target;REQUEST_FILENAME"
+SecRule REQUEST_FILENAME "@contains admin" "id:4502,phase:1,deny,status:403,tag:'skip-target'"
+"#,
+        );
+        let evaluation = eval(&rules, "GET", "/admin", &[], b"");
+        assert_eq!(evaluation.decision, Decision::Pass);
+    }
+
+    #[test]
+    fn rule_remove_target_by_id_skips_matching_variable() {
+        let rules = load(
+            r#"
+SecRule REQUEST_FILENAME "@contains admin" "id:4511,phase:1,pass,ctl:ruleRemoveTargetById=4512;REQUEST_FILENAME"
+SecRule REQUEST_FILENAME "@contains admin" "id:4512,phase:1,deny,status:403"
+"#,
+        );
+        let evaluation = eval(&rules, "GET", "/admin", &[], b"");
+        assert_eq!(evaluation.decision, Decision::Pass);
+    }
+
+    #[test]
+    fn request_body_processor_ctl_overrides_content_type() {
+        let rules = load(
+            r#"
+SecRule REQUEST_HEADERS:Content-Type "@contains text/plain" "id:4521,phase:1,pass,ctl:requestBodyProcessor=URLENCODED"
+SecRule ARGS_POST:a "@eq 1" "id:4522,phase:2,deny,status:403"
+"#,
+        );
+        let evaluation = eval(
+            &rules,
+            "POST",
+            "/submit",
+            &[("content-type", "text/plain")],
+            b"a=1",
+        );
+        assert!(matches!(
+            evaluation.decision,
+            Decision::Block { rule_id: 4522, .. }
+        ));
     }
 
     #[test]

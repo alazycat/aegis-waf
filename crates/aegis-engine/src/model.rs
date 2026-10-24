@@ -352,6 +352,10 @@ pub enum CtlAction {
     RuleEngine(RuleEngineMode),
     RemoveRuleById(u32),
     RemoveRuleByTag(String),
+    RequestBodyProcessor(BodyProcessor),
+    ForceRequestBodyVariable(bool),
+    RemoveTargetById { id: u32, target: Variable },
+    RemoveTargetByTag { tag: String, target: Variable },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

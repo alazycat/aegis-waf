@@ -339,3 +339,16 @@ fn rejects_count_of_count_and_negated_count() {
     let error = load(r#"SecRule !&ARGS "@gt 0" "id:1,pass""#).unwrap_err();
     assert!(error.to_string().contains("count"));
 }
+
+#[test]
+fn compiles_ctl_extensions() {
+    let rules = load(
+        r#"
+SecRule ARGS "@contains x" "id:1,phase:1,pass,ctl:requestBodyProcessor=JSON"
+SecRule ARGS "@contains x" "id:2,phase:1,pass,ctl:forceRequestBodyVariable=On"
+SecRule ARGS "@contains x" "id:3,phase:1,pass,ctl:ruleRemoveTargetByTag=t;ARGS:foo"
+"#,
+    )
+    .unwrap();
+    assert_eq!(rules.rule_count, 3);
+}
