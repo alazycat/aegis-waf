@@ -303,3 +303,31 @@ fn rejects_invalid_regex_with_location() {
         "unexpected message: {message}"
     );
 }
+
+#[test]
+fn compiles_regex_selectors() {
+    let rules =
+        load(r#"SecRule REQUEST_COOKIES:/^_ga/ "@contains x" "id:1,phase:1,pass""#).unwrap();
+    let RuleGroup::Single(rule) = &rules.phase1[0] else {
+        panic!("expected single rule");
+    };
+    assert!(matches!(
+        rule.variables[0].variable,
+        Variable::RequestCookies(Some(Selector::Regex(_)))
+    ));
+}
+
+#[test]
+fn rejects_invalid_selector_regex() {
+    let error =
+        load(r#"SecRule REQUEST_COOKIES:/(/ "@contains x" "id:1,phase:1,deny""#).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("rules.conf:1:1"),
+        "unexpected message: {message}"
+    );
+    assert!(
+        message.contains("invalid selector regex"),
+        "unexpected message: {message}"
+    );
+}

@@ -5,21 +5,61 @@ use std::sync::Arc;
 pub use crate::operators::CompiledOperator;
 pub use crate::transforms::Transform;
 
+#[derive(Debug, Clone)]
+pub struct RegexSelector {
+    pattern: String,
+    regex: regex::Regex,
+}
+
+impl RegexSelector {
+    pub fn new(pattern: &str) -> Result<Self, regex::Error> {
+        Ok(Self {
+            pattern: pattern.to_string(),
+            regex: regex::Regex::new(pattern)?,
+        })
+    }
+
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    pub fn is_match(&self, key: &str) -> bool {
+        self.regex.is_match(key)
+    }
+}
+
+impl PartialEq for RegexSelector {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern
+    }
+}
+
+impl Eq for RegexSelector {}
+
+impl std::hash::Hash for RegexSelector {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.pattern.hash(state);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Selector {
     Literal(String),
+    Regex(RegexSelector),
 }
 
 impl Selector {
     pub fn matches(&self, key: &str) -> bool {
         match self {
             Self::Literal(value) => value.eq_ignore_ascii_case(key),
+            Self::Regex(regex) => regex.is_match(key),
         }
     }
 
     pub fn as_display(&self) -> String {
         match self {
             Self::Literal(value) => value.clone(),
+            Self::Regex(regex) => format!("/{}/", regex.pattern()),
         }
     }
 }

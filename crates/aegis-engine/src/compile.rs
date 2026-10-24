@@ -538,6 +538,9 @@ fn first_rule_mut(group: &mut RuleGroup) -> &mut CompiledRule {
 }
 
 fn variable_prefilter_scope(variable: &Variable) -> Option<PrefilterScope> {
+    if matches!(variable.selector(), Some(Selector::Regex(_))) {
+        return None;
+    }
     match variable {
         Variable::RequestUri
         | Variable::RequestUriRaw
@@ -847,6 +850,18 @@ fn build_prefilter(
 fn lower_selector(selector: Selector) -> Selector {
     match selector {
         Selector::Literal(value) => Selector::Literal(value.to_ascii_lowercase()),
+        Selector::Regex(regex) => Selector::Regex(regex),
+    }
+}
+
+fn parse_selector(raw: &str) -> Result<Selector, String> {
+    if raw.len() >= 2 && raw.starts_with('/') && raw.ends_with('/') {
+        let pattern = &raw[1..raw.len() - 1];
+        RegexSelector::new(pattern)
+            .map(Selector::Regex)
+            .map_err(|error| format!("invalid selector regex: {error}"))
+    } else {
+        Ok(Selector::Literal(raw.to_string()))
     }
 }
 
@@ -889,7 +904,11 @@ fn parse_variables(
             ));
         }
         let (name, selector) = match item.split_once(':') {
-            Some((name, selector)) => (name, Some(Selector::Literal(selector.to_string()))),
+            Some((name, selector)) => {
+                let selector = parse_selector(selector)
+                    .map_err(|message| compile_error(file, line, column, message))?;
+                (name, Some(selector))
+            }
             None => (item, None),
         };
         let variable = match name.to_ascii_uppercase().as_str() {

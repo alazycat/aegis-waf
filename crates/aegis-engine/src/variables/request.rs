@@ -656,7 +656,7 @@ mod tests {
     use http::{HeaderMap, HeaderValue};
 
     use super::*;
-    use crate::model::Variable;
+    use crate::model::{RegexSelector, Variable};
 
     fn header_map(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -689,6 +689,16 @@ mod tests {
             .iter()
             .map(|entry| entry.value.clone())
             .collect()
+    }
+
+    #[test]
+    fn regex_selector_filters_cookie_names() {
+        let headers = header_map(&[("cookie", "_ga=1; session=abc; _gid=2")]);
+        let context = context(&headers);
+        let selector = Selector::Regex(RegexSelector::new("^_ga").unwrap());
+        let entries = context.extract(&Variable::RequestCookies(Some(selector)));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key.as_deref(), Some("_ga"));
     }
 
     #[test]
