@@ -9,7 +9,6 @@ use crate::model::{
     SetVarScope, Variable, VariableSpec,
 };
 use crate::variables::request::{RequestContext, RequestView, VariableEntry};
-use crate::variables::tx::expand_macros_with_remote;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -354,8 +353,7 @@ impl EvaluationState {
     }
 
     fn expand_template(&self, template: &str) -> String {
-        let remote_addr = self.context.remote_addr().to_string();
-        expand_macros_with_remote(template, self.context.tx(), Some(&remote_addr))
+        self.context.expand_macros(template)
     }
 
     fn apply_non_disruptive(&mut self, rule: &CompiledRule) {
@@ -550,8 +548,8 @@ fn target_excluded(target: &Variable, spec: &VariableSpec, entry: &VariableEntry
 }
 
 fn macro_integer(template: &str, context: &RequestContext) -> i64 {
-    let remote_addr = context.remote_addr().to_string();
-    expand_macros_with_remote(template, context.tx(), Some(&remote_addr))
+    context
+        .expand_macros(template)
         .trim()
         .parse::<i64>()
         .unwrap_or(0)

@@ -333,6 +333,66 @@ impl RequestContext {
         self.remote_addr
     }
 
+    pub fn expand_macros(&self, template: &str) -> String {
+        let remote_addr = self.remote_addr.to_string();
+        let mut output = String::with_capacity(template.len());
+        let mut rest = template;
+        while let Some(start) = rest.find("%{") {
+            output.push_str(&rest[..start]);
+            let after = &rest[start + 2..];
+            let Some(end) = after.find('}') else {
+                output.push_str(&rest[start..]);
+                return output;
+            };
+            let name = after[..end].trim().to_ascii_lowercase();
+            if let Some(tx_name) = name.strip_prefix("tx.") {
+                if let Some(value) = self.tx.get(tx_name) {
+                    output.push_str(value);
+                }
+            } else if let Some(header) = name.strip_prefix("request_headers.") {
+                if let Some((_, value)) = self
+                    .headers
+                    .iter()
+                    .find(|(header_name, _)| header_name.eq_ignore_ascii_case(header))
+                {
+                    output.push_str(value);
+                }
+            } else if let Some(cookie) = name.strip_prefix("request_cookies.") {
+                if let Some((_, value)) = self
+                    .cookies
+                    .iter()
+                    .find(|(cookie_name, _)| cookie_name.eq_ignore_ascii_case(cookie))
+                {
+                    output.push_str(value);
+                }
+            } else {
+                let value = match name.as_str() {
+                    "remote_addr" => Some(remote_addr.as_str()),
+                    "request_method" => Some(self.method.as_str()),
+                    "request_uri" | "request_uri_raw" => Some(self.uri.as_str()),
+                    "request_filename" => Some(self.path.as_str()),
+                    "request_basename" => Some(
+                        self.path
+                            .rsplit('/')
+                            .find(|segment| !segment.is_empty())
+                            .unwrap_or(""),
+                    ),
+                    "query_string" => self.query.as_deref(),
+                    "request_protocol" => Some(self.protocol.as_str()),
+                    "request_body" if self.body_available => Some(self.body_text.as_str()),
+                    "matched_var" | "matched_var_name" => self.tx.get(&name),
+                    _ => None,
+                };
+                if let Some(value) = value {
+                    output.push_str(value);
+                }
+            }
+            rest = &after[end + 1..];
+        }
+        output.push_str(rest);
+        output
+    }
+
     pub fn tx(&self) -> &TxStore {
         &self.tx
     }
@@ -1284,6 +1344,19 @@ mod tests {
         context.set_body(body).unwrap();
         assert_eq!(extract(&context, Variable::Files), vec!["fi;le"]);
         assert_eq!(extract(&context, Variable::FilesNames), vec!["te;st.txt"]);
+    }
+
+    #[test]
+    fn expands_request_macros() {
+        let headers = header_map(&[("Host", "localhost"), ("Referer", "http://x/")]);
+        let context = context(&headers);
+        assert_eq!(
+            context.expand_macros("%{request_headers.host}"),
+            "localhost"
+        );
+        assert_eq!(context.expand_macros("%{request_method}"), "POST");
+        assert_eq!(context.expand_macros("%{request_filename}"), "/search");
+        assert_eq!(context.expand_macros("%{remote_addr}"), "203.0.113.7");
     }
 
     #[test]
