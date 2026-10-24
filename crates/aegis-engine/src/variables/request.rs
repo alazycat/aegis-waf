@@ -187,6 +187,19 @@ impl RequestContext {
         }
     }
 
+    pub fn clear_matched_entries(&mut self) {
+        self.matched_entries.clear();
+    }
+
+    pub fn matched_entry_len(&self) -> usize {
+        self.matched_entries.len()
+    }
+
+    pub fn drop_matched_entries_before(&mut self, keep_from: usize) {
+        self.matched_entries
+            .drain(0..keep_from.min(self.matched_entries.len()));
+    }
+
     pub fn record_match(&mut self, name: &str, key: Option<&str>, value: &str) {
         self.matched_entries.push(VariableEntry {
             name: name.to_string(),

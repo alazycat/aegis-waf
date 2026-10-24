@@ -172,7 +172,8 @@ impl EvaluationState {
             }
             match group {
                 RuleGroup::Single(rule) => {
-                    let hits = self.rule_hits(rule, rule.actions.multi_match);
+                    let keep_from = self.context.matched_entry_len();
+                    let hits = self.rule_hits(rule, true);
                     if !hits.is_empty() {
                         if rule.actions.multi_match {
                             for hit in &hits {
@@ -181,9 +182,13 @@ impl EvaluationState {
                             }
                             self.record_rule_match(rule);
                         } else {
-                            self.apply_hit_context(rule, &hits[0]);
-                            self.apply_non_disruptive(rule);
+                            for hit in &hits {
+                                self.apply_hit_context(rule, hit);
+                            }
+                            self.apply_non_disruptive_actions(rule);
+                            self.record_rule_match(rule);
                         }
+                        self.context.drop_matched_entries_before(keep_from);
                         self.apply_disruptive(rule);
                         self.apply_skip_after(rules, rule);
                     }
@@ -191,6 +196,7 @@ impl EvaluationState {
                 RuleGroup::Chain(chain) => {
                     let mut all_match = true;
                     for rule in chain {
+                        let keep_from = self.context.matched_entry_len();
                         let hits = self.rule_hits(rule, true);
                         if hits.is_empty() {
                             all_match = false;
@@ -207,6 +213,7 @@ impl EvaluationState {
                             }
                             self.apply_non_disruptive_actions(rule);
                         }
+                        self.context.drop_matched_entries_before(keep_from);
                     }
                     if all_match {
                         self.record_rule_match(&chain[0]);
@@ -354,11 +361,6 @@ impl EvaluationState {
 
     fn expand_template(&self, template: &str) -> String {
         self.context.expand_macros(template)
-    }
-
-    fn apply_non_disruptive(&mut self, rule: &CompiledRule) {
-        self.apply_non_disruptive_actions(rule);
-        self.record_rule_match(rule);
     }
 
     fn apply_non_disruptive_actions(&mut self, rule: &CompiledRule) {
@@ -1188,6 +1190,39 @@ SecRule REQUEST_HEADERS:Content-Type "@contains application/ld+json" "id:2,phase
         let ids: Vec<u32> = evaluation.matched.iter().map(|rule| rule.id).collect();
         assert!(ids.contains(&1), "short needle was skipped: {ids:?}");
         assert!(ids.contains(&2), "long needle was skipped: {ids:?}");
+    }
+
+    #[test]
+    fn matched_vars_is_scoped_to_current_rule() {
+        let rules = load(
+            r#"
+SecRule ARGS "@streq other" "id:0,phase:1,pass"
+SecRule ARGS "@rx --" "id:1,phase:1,pass,chain"
+    SecRule MATCHED_VARS "!@rx ^[A-Za-z0-9_.-]+$" "t:none"
+"#,
+        );
+        let evaluation = eval(&rules, "GET", "/?x=other&token=abc--def", &[], b"");
+        assert!(
+            evaluation.matched.iter().all(|rule| rule.id != 1),
+            "chain matched because MATCHED_VARS leaked from another rule: {:?}",
+            evaluation.matched
+        );
+    }
+
+    #[test]
+    fn matched_vars_contains_all_hits_of_current_rule() {
+        let rules = load(
+            r#"
+SecRule ARGS "@rx foo" "id:1,phase:1,pass"
+SecRule MATCHED_VARS "@streq foobar" "id:2,phase:1,deny,status:403"
+"#,
+        );
+        let evaluation = eval(&rules, "GET", "/?a=foo&b=foobar", &[], b"");
+        assert!(
+            matches!(evaluation.decision, Decision::Block { rule_id: 2, .. }),
+            "MATCHED_VARS did not contain all hits: {:?}",
+            evaluation.decision
+        );
     }
 
     #[test]
