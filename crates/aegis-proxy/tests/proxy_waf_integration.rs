@@ -16,7 +16,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 
-use aegis_proxy::config::{AuditMode, AuditSink};
+use aegis_proxy::config::{AuditMode, AuditSink, ResponseBodyLimitAction};
 
 struct Harness {
     proxy: SocketAddr,
@@ -26,11 +26,43 @@ struct Harness {
     handle: tokio::task::JoinHandle<()>,
 }
 
+fn default_limits() -> aegis_proxy::config::LimitsConfig {
+    aegis_proxy::config::LimitsConfig {
+        max_header_bytes: 65536,
+        max_uri_bytes: 8192,
+        max_body_bytes: 1024,
+        max_response_body_bytes: 1048576,
+        response_body_limit_action: ResponseBodyLimitAction::Reject,
+        max_args: 10000,
+        max_multipart_parts: 1000,
+        max_multipart_part_headers: 64,
+        max_xml_depth: 64,
+        max_xml_values: 10000,
+        header_read_timeout_ms: 10000,
+        body_read_timeout_ms: 15000,
+    }
+}
+
 async fn harness(rules: &str) -> Harness {
-    harness_with_audit(rules, AuditSink::None, AuditMode::BlockedOnly).await
+    harness_with_limits(
+        rules,
+        AuditSink::None,
+        AuditMode::BlockedOnly,
+        default_limits(),
+    )
+    .await
 }
 
 async fn harness_with_audit(rules: &str, sink: AuditSink, mode: AuditMode) -> Harness {
+    harness_with_limits(rules, sink, mode, default_limits()).await
+}
+
+async fn harness_with_limits(
+    rules: &str,
+    sink: AuditSink,
+    mode: AuditMode,
+    limits: aegis_proxy::config::LimitsConfig,
+) -> Harness {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_addr = listener.local_addr().unwrap();
     let hits = Arc::new(AtomicUsize::new(0));
@@ -77,20 +109,7 @@ async fn harness_with_audit(rules: &str, sink: AuditSink, mode: AuditMode) -> Ha
             files: vec![rules_path.display().to_string()],
             lenient: false,
         },
-        limits: aegis_proxy::config::LimitsConfig {
-            max_header_bytes: 65536,
-            max_uri_bytes: 8192,
-            max_body_bytes: 1024,
-            max_response_body_bytes: 1048576,
-            response_body_limit_action: aegis_proxy::config::ResponseBodyLimitAction::Reject,
-            max_args: 10000,
-            max_multipart_parts: 1000,
-            max_multipart_part_headers: 64,
-            max_xml_depth: 64,
-            max_xml_values: 10000,
-            header_read_timeout_ms: 10000,
-            body_read_timeout_ms: 15000,
-        },
+        limits,
         on_error: aegis_proxy::config::OnError::Block,
         audit: aegis_proxy::config::AuditConfig {
             sink,
@@ -283,5 +302,57 @@ async fn blocked_only_mode_skips_pass_events() {
         .await
         .unwrap_or_default();
     assert!(text.is_empty(), "unexpected audit event: {text}");
+    harness.handle.abort();
+}
+
+#[tokio::test]
+async fn urlencoded_args_over_parse_limit_returns_413() {
+    let mut limits = default_limits();
+    limits.max_args = 2;
+    let harness = harness_with_limits(
+        r#"SecMarker START"#,
+        AuditSink::File,
+        AuditMode::All,
+        limits,
+    )
+    .await;
+    let request = Request::builder()
+        .method("POST")
+        .uri("http://example.test/submit")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Full::new(Bytes::from_static(b"a=1&b=2&c=3")))
+        .unwrap();
+    let (status, _) = send(harness.proxy, request).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(harness.hits.load(Ordering::SeqCst), 0);
+    let text = wait_for_audit(&harness.audit_path).await;
+    assert!(
+        text.contains("body_parse_limit: too many request arguments"),
+        "audit: {text}"
+    );
+    harness.handle.abort();
+}
+
+#[tokio::test]
+async fn multipart_parts_over_parse_limit_returns_413() {
+    let mut limits = default_limits();
+    limits.max_multipart_parts = 1;
+    let harness = harness_with_limits(
+        r#"SecMarker START"#,
+        AuditSink::None,
+        AuditMode::BlockedOnly,
+        limits,
+    )
+    .await;
+    let body = b"--X\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--X\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\n2\r\n--X--\r\n";
+    let request = Request::builder()
+        .method("POST")
+        .uri("http://example.test/upload")
+        .header("content-type", "multipart/form-data; boundary=X")
+        .body(Full::new(Bytes::from_static(body)))
+        .unwrap();
+    let (status, _) = send(harness.proxy, request).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(harness.hits.load(Ordering::SeqCst), 0);
     harness.handle.abort();
 }

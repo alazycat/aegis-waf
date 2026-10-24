@@ -15,7 +15,8 @@ use tokio::net::TcpListener;
 use tracing::{debug, warn};
 
 use aegis_engine::{
-    evaluate_phase, CompiledRules, Decision, Evaluation, EvaluationState, Phase, RequestView,
+    evaluate_phase, CompiledRules, Decision, Evaluation, EvaluationState, ParseLimits, Phase,
+    RequestView,
 };
 use uuid::Uuid;
 
@@ -208,7 +209,14 @@ async fn process(
     let body_len = body.len();
 
     if !skip_phase_two {
-        evaluation.set_body(&body);
+        if let Err(error) = evaluation.set_body(&body) {
+            return local_with_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request body structure too large\n",
+                body_len,
+                Some(format!("body_parse_limit: {error}")),
+            );
+        }
         evaluate_phase(evaluation, rules, Phase::Phase2);
         if let Decision::Block { status, .. } = evaluation.decision() {
             return blocked(*status, body_len);
@@ -360,6 +368,22 @@ fn blocked_with_upstream(
     }
 }
 
+fn local_with_error(
+    status: StatusCode,
+    message: &'static str,
+    body_bytes: usize,
+    error: Option<String>,
+) -> Outcome {
+    Outcome {
+        response: text_response(status, message),
+        status,
+        upstream_status: None,
+        upstream_latency_ms: None,
+        error,
+        request_body_bytes: body_bytes,
+    }
+}
+
 fn local_after_upstream(
     status: StatusCode,
     message: &'static str,
@@ -473,7 +497,15 @@ async fn handle(
             remote_addr: peer.ip(),
             unique_id: request_id.as_str(),
         };
-        EvaluationState::new_with_store(&view, state.collections.clone())
+        let mut evaluation = EvaluationState::new_with_store(&view, state.collections.clone());
+        evaluation.set_parse_limits(ParseLimits {
+            max_args: state.config.limits.max_args,
+            max_multipart_parts: state.config.limits.max_multipart_parts,
+            max_multipart_part_headers: state.config.limits.max_multipart_part_headers,
+            max_xml_depth: state.config.limits.max_xml_depth,
+            max_xml_values: state.config.limits.max_xml_values,
+        });
+        evaluation
     };
 
     let outcome = process(&state, &rules, &parts, incoming, peer, &mut evaluation).await;
