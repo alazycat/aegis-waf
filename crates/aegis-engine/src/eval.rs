@@ -627,7 +627,7 @@ fn scan_value(variant: &PrefilterVariant, value: &str, hits: &mut PrefilterHits)
 }
 
 fn mark_matches(matcher: &aho_corasick::AhoCorasick, value: &str, hits: &mut [bool]) {
-    for found in matcher.find_iter(value.as_bytes()) {
+    for found in matcher.find_overlapping_iter(value.as_bytes()) {
         if let Some(slot) = hits.get_mut(found.pattern().as_usize()) {
             *slot = true;
         }
@@ -1168,6 +1168,26 @@ SecRule ARGS "@contains attack" "id:3,phase:1,deny,status:403"
             blocked.decision,
             Decision::Block { rule_id: 3, .. }
         ));
+    }
+
+    #[test]
+    fn prefilter_keeps_short_needles_when_longer_needle_matches() {
+        let rules = load(
+            r#"
+SecRule REQUEST_HEADERS:Content-Type "@rx ^(application/[a-z]+\+json)$" "id:1,phase:1,pass,t:lowercase"
+SecRule REQUEST_HEADERS:Content-Type "@contains application/ld+json" "id:2,phase:1,pass,t:lowercase"
+"#,
+        );
+        let evaluation = eval(
+            &rules,
+            "GET",
+            "/",
+            &[("content-type", "application/ld+json")],
+            b"",
+        );
+        let ids: Vec<u32> = evaluation.matched.iter().map(|rule| rule.id).collect();
+        assert!(ids.contains(&1), "short needle was skipped: {ids:?}");
+        assert!(ids.contains(&2), "long needle was skipped: {ids:?}");
     }
 
     #[test]
