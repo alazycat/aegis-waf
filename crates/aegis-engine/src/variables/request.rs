@@ -106,6 +106,7 @@ pub struct RequestContext {
     unique_id: String,
     body_text: String,
     body_len: usize,
+    body_available: bool,
     body_processor: BodyProcessor,
     body_processor_override: Option<BodyProcessor>,
     xml_values: Vec<String>,
@@ -167,6 +168,7 @@ impl RequestContext {
             unique_id: view.unique_id.to_string(),
             body_text: String::new(),
             body_len: 0,
+            body_available: false,
             body_processor: BodyProcessor::None,
             body_processor_override: None,
             xml_values: Vec::new(),
@@ -247,6 +249,10 @@ impl RequestContext {
         self.body_processor = self
             .body_processor_override
             .unwrap_or_else(|| derive_body_processor(&self.headers));
+        self.body_available = !matches!(
+            self.body_processor,
+            BodyProcessor::Xml | BodyProcessor::Json
+        );
         self.body_pairs = Vec::new();
         self.multipart_parts = Vec::new();
         self.xml_values = Vec::new();
@@ -451,7 +457,13 @@ impl RequestContext {
                 .into_iter()
                 .map(|name| VariableEntry::item("REQUEST_COOKIES_NAMES", &name, name.clone()))
                 .collect(),
-            Variable::RequestBody => vec![VariableEntry::scalar(variable, self.body_text.clone())],
+            Variable::RequestBody => {
+                if self.body_available {
+                    vec![VariableEntry::scalar(variable, self.body_text.clone())]
+                } else {
+                    Vec::new()
+                }
+            }
             Variable::RequestBodyLength => {
                 vec![VariableEntry::scalar(variable, self.body_len.to_string())]
             }
@@ -1240,6 +1252,7 @@ mod tests {
         context.set_body(b"{\"a\":1}").unwrap();
         assert_eq!(context.body_processor(), BodyProcessor::Json);
         assert!(extract(&context, Variable::ArgsPost(None)).is_empty());
+        assert!(extract(&context, Variable::RequestBody).is_empty());
         assert_eq!(extract(&context, Variable::ReqbodyProcessor), vec!["JSON"]);
     }
 
