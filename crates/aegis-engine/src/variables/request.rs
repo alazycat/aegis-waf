@@ -477,19 +477,13 @@ impl RequestContext {
                 .multipart_parts
                 .iter()
                 .filter(|part| part.filename.is_some())
-                .map(|part| {
-                    VariableEntry::item(
-                        "FILES",
-                        &part.name,
-                        String::from_utf8_lossy(&part.data).into_owned(),
-                    )
-                })
+                .map(|part| VariableEntry::item("FILES", &part.name, part.name.clone()))
                 .collect(),
             Variable::FilesNames => self
                 .multipart_parts
                 .iter()
-                .filter(|part| part.filename.is_some())
-                .map(|part| VariableEntry::item("FILES_NAMES", &part.name, part.name.clone()))
+                .filter_map(|part| part.filename.as_ref())
+                .map(|filename| VariableEntry::item("FILES_NAMES", filename, filename.clone()))
                 .collect(),
             Variable::FilesSizes => self
                 .multipart_parts
@@ -808,17 +802,53 @@ fn parse_part_disposition(headers: &str) -> Option<(String, Option<String>)> {
         line.to_ascii_lowercase()
             .starts_with("content-disposition:")
     })?;
+    let rest = disposition.split_once(':')?.1;
     let mut name = None;
     let mut filename = None;
-    for part in disposition.split(';').skip(1) {
-        let part = part.trim();
-        if let Some(value) = part.strip_prefix("name=") {
-            name = Some(value.trim_matches('"').to_string());
-        } else if let Some(value) = part.strip_prefix("filename=") {
-            filename = Some(value.trim_matches('"').to_string());
+    for part in split_quoted(rest, ';') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = unquote_param(value.trim());
+        match key.as_str() {
+            "name" => name = Some(value),
+            "filename" => filename = Some(value),
+            _ => {}
         }
     }
     name.map(|name| (name, filename))
+}
+
+fn split_quoted(input: &str, delimiter: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quote: Option<char> = None;
+    for (index, ch) in input.char_indices() {
+        match quote {
+            Some(open) if ch == open => quote = None,
+            Some(_) => {}
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch == delimiter => {
+                parts.push(&input[start..index]);
+                start = index + ch.len_utf8();
+            }
+            None => {}
+        }
+    }
+    parts.push(&input[start..]);
+    parts
+}
+
+fn unquote_param(value: &str) -> String {
+    let value = value.trim();
+    let quoted = value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')));
+    if !quoted {
+        return value.to_string();
+    }
+    value[1..value.len() - 1].to_string()
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -1177,8 +1207,8 @@ mod tests {
         let mut context = context(&headers);
         let body = b"--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nfile-content\r\n--X\r\nContent-Disposition: form-data; name=\"field\"\r\n\r\nvalue\r\n--X--\r\n";
         context.set_body(body).unwrap();
-        assert_eq!(extract(&context, Variable::Files), vec!["file-content"]);
-        assert_eq!(extract(&context, Variable::FilesNames), vec!["file"]);
+        assert_eq!(extract(&context, Variable::Files), vec!["file"]);
+        assert_eq!(extract(&context, Variable::FilesNames), vec!["a.txt"]);
         assert_eq!(extract(&context, Variable::FilesSizes), vec!["12"]);
         assert_eq!(extract(&context, Variable::FilesCombinedSize), vec!["12"]);
         assert!(extract(&context, Variable::FilesTmpnames).is_empty());
@@ -1200,7 +1230,7 @@ mod tests {
         ))));
         assert_eq!(charset.len(), 2);
         assert_eq!(extract(&context, Variable::ArgsPost(None)), vec!["UTF-8"]);
-        assert_eq!(extract(&context, Variable::Files), vec!["file-content"]);
+        assert_eq!(extract(&context, Variable::Files), vec!["file"]);
     }
 
     #[test]
@@ -1233,6 +1263,16 @@ mod tests {
         context.set_body(b"q=body").unwrap();
         let after = context.extract(&Variable::ArgsGet(None));
         assert!(!Arc::ptr_eq(&first, &after));
+    }
+
+    #[test]
+    fn multipart_disposition_params_respect_quotes() {
+        let headers = header_map(&[("content-type", "multipart/form-data; boundary=X")]);
+        let mut context = context(&headers);
+        let body = b"--X\r\nContent-Disposition: form-data; name=\"fi;le\"; filename=\"te;st.txt\"\r\nContent-Type: text/plain\r\n\r\nvalue\r\n--X--\r\n";
+        context.set_body(body).unwrap();
+        assert_eq!(extract(&context, Variable::Files), vec!["fi;le"]);
+        assert_eq!(extract(&context, Variable::FilesNames), vec!["te;st.txt"]);
     }
 
     #[test]
