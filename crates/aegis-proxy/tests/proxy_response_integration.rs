@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full, StreamBody};
 use hyper::body::Incoming;
 use hyper::header::{HeaderValue, HOST};
 use hyper::service::service_fn;
@@ -14,6 +15,8 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 
+use aegis_proxy::config::ResponseBodyLimitAction;
+
 struct Harness {
     proxy: SocketAddr,
     hits: Arc<AtomicUsize>,
@@ -21,11 +24,36 @@ struct Harness {
     handle: tokio::task::JoinHandle<()>,
 }
 
+#[derive(Clone)]
+enum TestBody {
+    Full(Bytes),
+    Chunked(Bytes),
+}
+
 async fn harness(
     rules: &str,
     upstream_status: StatusCode,
     upstream_body: &'static [u8],
     max_response_body_bytes: usize,
+) -> Harness {
+    harness_with_body(
+        rules,
+        upstream_status,
+        vec![("content-type", "text/plain".to_string())],
+        TestBody::Full(Bytes::from_static(upstream_body)),
+        max_response_body_bytes,
+        ResponseBodyLimitAction::Reject,
+    )
+    .await
+}
+
+async fn harness_with_body(
+    rules: &str,
+    upstream_status: StatusCode,
+    upstream_headers: Vec<(&'static str, String)>,
+    body: TestBody,
+    max_response_body_bytes: usize,
+    action: ResponseBodyLimitAction,
 ) -> Harness {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_addr = listener.local_addr().unwrap();
@@ -35,19 +63,30 @@ async fn harness(
         loop {
             let (stream, _) = listener.accept().await.unwrap();
             let hits = hits_for_server.clone();
+            let body = body.clone();
+            let upstream_headers = upstream_headers.clone();
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
                 let service = service_fn(move |_request: Request<Incoming>| {
                     let hits = hits.clone();
+                    let body = body.clone();
+                    let upstream_headers = upstream_headers.clone();
                     async move {
                         hits.fetch_add(1, Ordering::SeqCst);
-                        Ok::<_, Infallible>(
-                            Response::builder()
-                                .status(upstream_status)
-                                .header("content-type", "text/plain")
-                                .body(Full::new(Bytes::from_static(upstream_body)))
-                                .unwrap(),
-                        )
+                        let mut builder = Response::builder().status(upstream_status);
+                        for (name, value) in &upstream_headers {
+                            builder = builder.header(*name, value);
+                        }
+                        let response_body: BoxBody<Bytes, Infallible> = match body {
+                            TestBody::Full(bytes) => Full::new(bytes).boxed(),
+                            TestBody::Chunked(bytes) => {
+                                let stream = futures_util::stream::iter(vec![Ok::<_, Infallible>(
+                                    hyper::body::Frame::data(bytes),
+                                )]);
+                                StreamBody::new(stream).boxed()
+                            }
+                        };
+                        Ok::<_, Infallible>(builder.body(response_body).unwrap())
                     }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
@@ -81,7 +120,7 @@ async fn harness(
             max_uri_bytes: 8192,
             max_body_bytes: 1024,
             max_response_body_bytes,
-            response_body_limit_action: aegis_proxy::config::ResponseBodyLimitAction::Reject,
+            response_body_limit_action: action,
             max_args: 10000,
             max_multipart_parts: 1000,
             max_multipart_part_headers: 64,
@@ -117,7 +156,7 @@ async fn harness(
     }
 }
 
-async fn send(addr: SocketAddr, request: Request<Full<Bytes>>) -> (StatusCode, String) {
+async fn send_bytes(addr: SocketAddr, request: Request<Full<Bytes>>) -> (StatusCode, Bytes) {
     let (mut parts, body) = request.into_parts();
     let path_and_query = parts
         .uri
@@ -143,6 +182,11 @@ async fn send(addr: SocketAddr, request: Request<Full<Bytes>>) -> (StatusCode, S
     let response = client.request(request).await.unwrap();
     let status = response.status();
     let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, body)
+}
+
+async fn send(addr: SocketAddr, request: Request<Full<Bytes>>) -> (StatusCode, String) {
+    let (status, body) = send_bytes(addr, request).await;
     (status, String::from_utf8_lossy(&body).into_owned())
 }
 
@@ -200,17 +244,119 @@ async fn phase_four_allows_safe_response() {
 }
 
 #[tokio::test]
-async fn phase_four_is_skipped_when_response_exceeds_limit() {
-    let harness = harness(
+async fn phase_four_is_skipped_when_response_exceeds_limit_and_passing() {
+    let harness = harness_with_body(
         r#"SecRule RESPONSE_BODY "@contains 789" "id:2,phase:4,deny,status:403""#,
         StatusCode::OK,
-        b"0123456789",
+        vec![("content-type", "text/plain".to_string())],
+        TestBody::Full(Bytes::from_static(b"0123456789")),
         4,
+        ResponseBodyLimitAction::Pass,
     )
     .await;
     let (status, body) = send(harness.proxy, get("http://example.test/")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "0123456789");
     assert_eq!(harness.hits.load(Ordering::SeqCst), 1);
+    harness.handle.abort();
+}
+
+#[tokio::test]
+async fn phase_four_inspects_chunked_response() {
+    let harness = harness_with_body(
+        r#"SecRule RESPONSE_BODY "@contains secret" "id:2,phase:4,deny,status:403""#,
+        StatusCode::OK,
+        vec![("content-type", "text/plain".to_string())],
+        TestBody::Chunked(Bytes::from_static(b"a secret response")),
+        1048576,
+        ResponseBodyLimitAction::Reject,
+    )
+    .await;
+    let (status, _) = send(harness.proxy, get("http://example.test/")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(harness.hits.load(Ordering::SeqCst), 1);
+    harness.handle.abort();
+}
+
+#[tokio::test]
+async fn over_limit_chunked_response_is_rejected() {
+    let harness = harness_with_body(
+        r#"SecRule RESPONSE_BODY "@contains never-match" "id:2,phase:4,pass""#,
+        StatusCode::OK,
+        vec![("content-type", "text/plain".to_string())],
+        TestBody::Chunked(Bytes::from_static(b"0123456789abcdef0123456789abcdef")),
+        16,
+        ResponseBodyLimitAction::Reject,
+    )
+    .await;
+    let (status, _) = send(harness.proxy, get("http://example.test/")).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    harness.handle.abort();
+}
+
+#[tokio::test]
+async fn over_limit_chunked_response_passes_through() {
+    let harness = harness_with_body(
+        r#"SecRule RESPONSE_BODY "@contains never-match" "id:2,phase:4,pass""#,
+        StatusCode::OK,
+        vec![("content-type", "text/plain".to_string())],
+        TestBody::Chunked(Bytes::from_static(b"0123456789abcdef0123456789abcdef")),
+        16,
+        ResponseBodyLimitAction::Pass,
+    )
+    .await;
+    let (status, body) = send_bytes(harness.proxy, get("http://example.test/")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_ref(), b"0123456789abcdef0123456789abcdef");
+    harness.handle.abort();
+}
+
+#[tokio::test]
+async fn over_limit_known_length_response_is_rejected() {
+    let harness = harness_with_body(
+        r#"SecRule RESPONSE_BODY "@contains never-match" "id:2,phase:4,pass""#,
+        StatusCode::OK,
+        vec![("content-type", "text/plain".to_string())],
+        TestBody::Full(Bytes::from_static(b"0123456789abcdef0123456789abcdef")),
+        16,
+        ResponseBodyLimitAction::Reject,
+    )
+    .await;
+    let (status, _) = send(harness.proxy, get("http://example.test/")).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    harness.handle.abort();
+}
+
+#[tokio::test]
+async fn over_limit_known_length_response_passes_through() {
+    let harness = harness_with_body(
+        r#"SecRule RESPONSE_BODY "@contains never-match" "id:2,phase:4,pass""#,
+        StatusCode::OK,
+        vec![("content-type", "text/plain".to_string())],
+        TestBody::Full(Bytes::from_static(b"0123456789abcdef0123456789abcdef")),
+        16,
+        ResponseBodyLimitAction::Pass,
+    )
+    .await;
+    let (status, body) = send_bytes(harness.proxy, get("http://example.test/")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_ref(), b"0123456789abcdef0123456789abcdef");
+    harness.handle.abort();
+}
+
+#[tokio::test]
+async fn event_stream_is_not_buffered() {
+    let harness = harness_with_body(
+        r#"SecRule RESPONSE_BODY "@contains secret" "id:2,phase:4,deny,status:403""#,
+        StatusCode::OK,
+        vec![("content-type", "text/event-stream".to_string())],
+        TestBody::Chunked(Bytes::from_static(b"a secret event")),
+        1048576,
+        ResponseBodyLimitAction::Reject,
+    )
+    .await;
+    let (status, body) = send_bytes(harness.proxy, get("http://example.test/")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_ref(), b"a secret event");
     harness.handle.abort();
 }

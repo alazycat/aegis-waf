@@ -21,10 +21,13 @@ use aegis_engine::{
 use uuid::Uuid;
 
 use crate::audit_sink;
+use crate::config::ResponseBodyLimitAction;
+use crate::proxy::response_body::is_event_stream;
 use crate::state::AppState;
 
 pub mod forward;
 pub mod limits;
+pub mod response_body;
 
 pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
 
@@ -195,7 +198,7 @@ async fn process(
     .await
     {
         Ok(body) => body,
-        Err(limits::BodyError::TooLarge) => {
+        Err(limits::BodyError::TooLarge { .. }) => {
             return local(StatusCode::PAYLOAD_TOO_LARGE, "request body too large\n");
         }
         Err(limits::BodyError::Timeout) => {
@@ -267,21 +270,19 @@ async fn process(
         }
     }
 
-    let inspect_body = !rules.phase4.is_empty()
-        && content_length(&response_parts.headers)
-            .map(|length| length <= state.config.limits.max_response_body_bytes as u64)
-            .unwrap_or(false);
+    let max_body = state.config.limits.max_response_body_bytes;
+    let limit_action = state.config.limits.response_body_limit_action;
+    let mut forward_body: Option<ProxyBody> = None;
+    let mut buffered_body: Option<Bytes> = None;
 
-    if inspect_body {
-        let response_body = match limits::read_body_limited(
-            response_body,
-            state.config.limits.max_response_body_bytes,
-            Duration::from_millis(state.config.limits.body_read_timeout_ms),
-        )
-        .await
-        {
-            Ok(body) => body,
-            Err(limits::BodyError::TooLarge) => {
+    if rules.phase4.is_empty() || is_event_stream(&response_parts.headers) {
+        forward_body = Some(response_body.boxed());
+    } else if content_length(&response_parts.headers)
+        .map(|length| length > max_body as u64)
+        .unwrap_or(false)
+    {
+        match limit_action {
+            ResponseBodyLimitAction::Reject => {
                 return local_after_upstream(
                     StatusCode::BAD_GATEWAY,
                     "upstream body too large\n",
@@ -291,6 +292,30 @@ async fn process(
                     "upstream_body_too_large",
                 );
             }
+            ResponseBodyLimitAction::Pass => forward_body = Some(response_body.boxed()),
+        }
+    } else {
+        let timeout = Duration::from_millis(state.config.limits.body_read_timeout_ms);
+        match limits::read_body_limited(response_body, max_body, timeout).await {
+            Ok(raw) => {
+                evaluation.set_response_body(&raw);
+                buffered_body = Some(raw);
+            }
+            Err(limits::BodyError::TooLarge { prefix, rest }) => match limit_action {
+                ResponseBodyLimitAction::Reject => {
+                    return local_after_upstream(
+                        StatusCode::BAD_GATEWAY,
+                        "upstream body too large\n",
+                        body_len,
+                        upstream_status,
+                        upstream_latency,
+                        "upstream_body_too_large",
+                    );
+                }
+                ResponseBodyLimitAction::Pass => {
+                    forward_body = Some(limits::prefix_body(prefix, rest));
+                }
+            },
             Err(limits::BodyError::Timeout) => {
                 return local_after_upstream(
                     StatusCode::GATEWAY_TIMEOUT,
@@ -312,8 +337,10 @@ async fn process(
                     "upstream_body_error",
                 );
             }
-        };
-        evaluation.set_response_body(&response_body);
+        }
+    }
+
+    if let Some(raw) = buffered_body.take() {
         evaluate_phase(evaluation, rules, Phase::Phase4);
         if let Decision::Block { status, .. } = evaluation.decision() {
             return blocked_with_upstream(
@@ -323,31 +350,34 @@ async fn process(
                 upstream_latency,
             );
         }
-        if !rules.phase5.is_empty() {
-            evaluate_phase(evaluation, rules, Phase::Phase5);
+        forward_body = Some(full_body(raw));
+    }
+
+    if !rules.phase5.is_empty() {
+        evaluate_phase(evaluation, rules, Phase::Phase5);
+    }
+
+    let response_body = match forward_body {
+        Some(body) => body,
+        None => {
+            return local_after_upstream(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "response body unavailable\n",
+                body_len,
+                upstream_status,
+                upstream_latency,
+                "response_body_unavailable",
+            );
         }
-        let downstream_status = response_parts.status;
-        Outcome {
-            response: build_response(response_parts, full_body(response_body)),
-            status: downstream_status,
-            upstream_status: Some(upstream_status),
-            upstream_latency_ms: upstream_latency,
-            error: None,
-            request_body_bytes: body_len,
-        }
-    } else {
-        if !rules.phase5.is_empty() {
-            evaluate_phase(evaluation, rules, Phase::Phase5);
-        }
-        let downstream_status = response_parts.status;
-        Outcome {
-            response: build_response(response_parts, response_body.boxed()),
-            status: downstream_status,
-            upstream_status: Some(upstream_status),
-            upstream_latency_ms: upstream_latency,
-            error: None,
-            request_body_bytes: body_len,
-        }
+    };
+    let downstream_status = response_parts.status;
+    Outcome {
+        response: build_response(response_parts, response_body),
+        status: downstream_status,
+        upstream_status: Some(upstream_status),
+        upstream_latency_ms: upstream_latency,
+        error: None,
+        request_body_bytes: body_len,
     }
 }
 

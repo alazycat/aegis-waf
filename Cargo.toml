@@ -31,6 +31,7 @@ hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", 
 http-body-util = "0.1"
 bytes = "1"
 arc-swap = "1"
+futures-util = "0.3"
 glob = "0.3"
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
