@@ -173,7 +173,7 @@ impl EvaluationState {
             }
             match group {
                 RuleGroup::Single(rule) => {
-                    let hits = self.rule_hits(rule);
+                    let hits = self.rule_hits(rule, rule.actions.multi_match);
                     if !hits.is_empty() {
                         if rule.actions.multi_match {
                             for hit in &hits {
@@ -192,7 +192,7 @@ impl EvaluationState {
                 RuleGroup::Chain(chain) => {
                     let mut all_match = true;
                     for rule in chain {
-                        let hits = self.rule_hits(rule);
+                        let hits = self.rule_hits(rule, true);
                         if hits.is_empty() {
                             all_match = false;
                             break;
@@ -203,7 +203,9 @@ impl EvaluationState {
                                 self.apply_non_disruptive_actions(rule);
                             }
                         } else {
-                            self.apply_hit_context(rule, &hits[0]);
+                            for hit in &hits {
+                                self.apply_hit_context(rule, hit);
+                            }
                             self.apply_non_disruptive_actions(rule);
                         }
                     }
@@ -236,7 +238,7 @@ impl EvaluationState {
         }
     }
 
-    fn rule_hits(&self, rule: &CompiledRule) -> Vec<RuleHit> {
+    fn rule_hits(&self, rule: &CompiledRule, collect_all: bool) -> Vec<RuleHit> {
         if rule.unconditional {
             return vec![RuleHit {
                 value: String::new(),
@@ -286,7 +288,7 @@ impl EvaluationState {
                         key: entry.key.clone(),
                         captures,
                     });
-                    if !rule.actions.multi_match {
+                    if !collect_all {
                         return hits;
                     }
                 }
@@ -1173,6 +1175,22 @@ SecRule ARGS "@contains attack" "id:3,phase:1,deny,status:403"
             blocked.decision,
             Decision::Block { rule_id: 3, .. }
         ));
+    }
+
+    #[test]
+    fn chain_matched_vars_contains_all_head_hits() {
+        let rules = load(
+            r#"
+SecRule ARGS "@rx foo" "id:1,phase:1,pass,chain"
+    SecRule MATCHED_VARS "@rx bar" "t:none"
+"#,
+        );
+        let evaluation = eval(&rules, "GET", "/?a=foo&b=foobar", &[], b"");
+        assert!(
+            evaluation.matched.iter().any(|rule| rule.id == 1),
+            "chain did not match all head hits: {:?}",
+            evaluation.matched
+        );
     }
 
     #[test]
