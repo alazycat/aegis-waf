@@ -568,3 +568,12 @@ bash scripts/bench_e2e.sh
 - 173 个测试全部通过（引擎 136，代理 37）。
 - `cargo fmt --check` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
 - `bash scripts/bench_crs.sh` 可复现第 13 节与本节数字。
+
+## 17. go-ftw 回归基线（2026-10-24）
+
+- CRS commit：`58ff33b`
+- go-ftw：v2.6.1
+- 全量：run=5259，success=5195，failed=63，skipped=1
+- 门禁目录：passed=3547，failed=0，known-gap=44，stale-gap=0
+- 报告：`target/ftw/report.json`
+- 已知差异：`scripts/ftw-known-gaps.txt`（hyper 请求解析、非 UTF-8 字节、PCRE/transform 边界）

@@ -13,6 +13,14 @@ aegis-waf v0.1 不声称完整兼容 OWASP CRS。引擎实现了下表列出的�
 TTL/Redis、完整 XPath、响应压缩检测等，见文末“已知不兼容”。详见
 `docs/benchmarks.md` 第 13 节与第 16 节。
 
+go-ftw 全量基线（CRS commit `58ff33b`，go-ftw v2.6.1）：
+
+- 运行 5259 个用例：成功 5195，失败 63，跳过 1。
+- 门禁目录通过 **3547** 个；**44** 个失败登记在
+  `scripts/ftw-known-gaps.txt`，未登记失败为 0。
+- 已知差异集中在 hyper 层面的请求解析（原始 URI/请求头）、非 UTF-8 字节
+  的有损转换、以及少量 PCRE/transform 边界；详见 `docs/ftw.md`。
+
 ## 已支持
 
 | 类别 | 内容 |
@@ -75,6 +83,15 @@ TTL/Redis、完整 XPath、响应压缩检测等，见文末“已知不兼容�
 - `@validateByteRange`、`@validateUtf8Encoding`、`@validateUrlEncoding`
   均在“校验失败”时匹配；`@validateUtf8Encoding` 通过 U+FFFD 近似检测非法 UTF-8。
 - `@gt/@ge/@lt/@le` 的参数支持 `%{tx.name}` 等宏，在求值时展开。
+- 响应体检测不再要求 `Content-Length`；chunked 响应会被缓冲检测。
+- `gzip` / `x-gzip` / `deflate` / `br` 响应按解码后内容检测，转发保持原始编码。
+- 响应体超过 `max_response_body_bytes` 时默认 502；`pass` 模式流式透传且不检测。
+- URL-encoded 参数、multipart part/头、XML 深度/值数量超过结构上限时返回 413。
+- JSON 请求体字段会递归展平后写入 `ARGS`/`ARGS_NAMES`（键路径使用点号）。
+- `FILES` 值为客户端文件名，`FILES_NAMES` 值为 multipart 表单字段名。
+- `MATCHED_VARS` 反映最近一次匹配规则（或链节）的全部命中值，不跨规则累积。
+- `t:urlDecodeUni` 对常用 Unicode 字符执行 best-fit 映射（智能引号、全角字符等）。
+- 审计事件中的 `matched_rules[]` 包含规则 `logdata`，便于日志断言与外部消费。
 - XML 变量使用 `roxmltree` 提取所有元素文本和属性值；复杂 XPath 选择器未实现，
   `XML:selector` 当前按全量匹配处理。
 - 持久化集合使用内存 `MemoryCollectionStore`，跨请求保留；无过期时间、无 Redis 后端。
@@ -124,6 +141,8 @@ TTL/Redis、完整 XPath、响应压缩检测等，见文末“已知不兼容�
 - chunked/超大响应体的 Phase 4 检测
 - 响应压缩内容的解压后检测
 - Lua、GeoIP、WASM 插件（v0.1 运行时）
+- `text/event-stream` 响应不检测
+- 请求体压缩内容不解码；未知 `Content-Encoding` 按原始字节检测
 - `@validateUtf8Encoding` 通过 U+FFFD 近似检测非法 UTF-8
 - `multiMatch` 每条规则只记录一条审计
 - `ctl:forceRequestBodyVariable` 为 no-op；`requestBodyProcessor`

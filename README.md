@@ -18,6 +18,9 @@ Rust 编写的反向代理 Web 应用防火墙（WAF）v0.1。
 - 校验算子：`@validateByteRange`、`@validateUtf8Encoding`、`@validateUrlEncoding`
 - 数值算子宏参数（`@ge %{tx.threshold}`），可表达 CRS 的异常评分拦截
 - 请求体处理器感知：URLENCODED/MULTIPART/JSON/XML，multipart 字段进入 `ARGS_POST`
+- 响应体检测覆盖 chunked、gzip/deflate/br 压缩内容与超限拒绝策略
+- 请求解析结构上限（参数、multipart part/头、XML 深度/值数量）
+- go-ftw 回归套件门禁（核心规则目录）
 - TX 变量、`setvar`、持久化集合（内存）、`MATCHED_VAR` 与宏展开，可表达 CRS 风格异常评分
 - 规则热重载（管理 API 与 Unix `SIGHUP`）
 - 变量提取缓存与 Aho-Corasick/RegexSet 预筛（含 regex 字面量与变换感知）
@@ -100,7 +103,9 @@ AI 不进入请求路径，不影响转发延迟。
 
 ## 已知限制
 
-- 响应体检测仅限已知 `Content-Length` 且不超过上限；chunked/超大响应只做响应头检测
+- `text/event-stream` 响应不缓冲、不检测
+- 请求体压缩内容不解码；未知响应编码按原始字节检测
+- 响应体超过上限时默认返回 502，可用 `limits.response_body_limit_action: pass` 放行
 - 不终止 TLS，不支持 HTTP/2
 - CRS 规则全部可编译，但部分语义仍是近似实现，详见 `docs/compatibility.md`
 - `ctl` 支持 audit/rule engine、规则移除、body processor 与 target 移除；其他 ctl 忽略
@@ -109,6 +114,7 @@ AI 不进入请求路径，不影响转发延迟。
 - `@validateUtf8Encoding` 通过 U+FFFD 近似检测非法 UTF-8
 - `multiMatch` 每条规则只记录一条审计
 - 响应压缩内容不解压后检测
+- go-ftw 门禁目录存在 44 条已知差异（hyper 请求解析、非 UTF-8 字节、PCRE/transform 边界）
 - 头部大小限制在 hyper 解析后近似统计
 - `on_error` 为未来引擎内部错误预留；当前引擎求值无可恢复错误路径
 
@@ -119,6 +125,7 @@ AI 不进入请求路径，不影响转发延迟。
 - [CRS 兼容性扩展设计](docs/superpowers/specs/2026-10-24-aegis-waf-crs-compatibility-design.md)
 - [CRS 兼容性扩展计划](docs/superpowers/plans/2026-10-24-aegis-waf-crs-compatibility.md)
 - [兼容性报告](docs/compatibility.md)
+- [go-ftw 回归测试](docs/ftw.md)
 - [性能基准](docs/benchmarks.md)
 
 ## 许可证
