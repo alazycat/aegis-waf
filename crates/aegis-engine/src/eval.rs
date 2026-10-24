@@ -202,15 +202,8 @@ impl EvaluationState {
                             all_match = false;
                             break;
                         }
-                        if rule.actions.multi_match {
-                            for hit in &hits {
-                                self.apply_hit_context(rule, hit);
-                                self.apply_non_disruptive_actions(rule);
-                            }
-                        } else {
-                            for hit in &hits {
-                                self.apply_hit_context(rule, hit);
-                            }
+                        for hit in &hits {
+                            self.apply_hit_context(rule, hit);
                             self.apply_non_disruptive_actions(rule);
                         }
                         self.context.drop_matched_entries_before(keep_from);
@@ -1190,6 +1183,28 @@ SecRule REQUEST_HEADERS:Content-Type "@contains application/ld+json" "id:2,phase
         let ids: Vec<u32> = evaluation.matched.iter().map(|rule| rule.id).collect();
         assert!(ids.contains(&1), "short needle was skipped: {ids:?}");
         assert!(ids.contains(&2), "long needle was skipped: {ids:?}");
+    }
+
+    #[test]
+    fn chain_actions_run_for_each_head_hit() {
+        let rules = load(
+            r#"
+SecRule REQUEST_HEADERS_NAMES "@rx ^.*$" "id:1,phase:1,pass,chain,capture,setvar:'tx.h_%{tx.0}=1'"
+    SecRule TX:/^h_accept$/ "@streq 1" "t:none"
+"#,
+        );
+        let evaluation = eval(
+            &rules,
+            "GET",
+            "/",
+            &[("accept", "*/*"), ("host", "localhost")],
+            b"",
+        );
+        assert!(
+            evaluation.matched.iter().any(|rule| rule.id == 1),
+            "chain did not see per-header setvars: {:?}",
+            evaluation.matched
+        );
     }
 
     #[test]
