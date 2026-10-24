@@ -681,7 +681,7 @@ fn derive_body_processor(headers: &[(String, String)]) -> BodyProcessor {
         .find(|(name, _)| name == "content-type")
         .map(|(_, value)| value.to_ascii_lowercase())
     else {
-        return BodyProcessor::UrlEncoded;
+        return BodyProcessor::None;
     };
     if content_type.starts_with("application/x-www-form-urlencoded") {
         BodyProcessor::UrlEncoded
@@ -1257,12 +1257,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_content_type_defaults_to_urlencoded() {
+    fn missing_content_type_does_not_parse_args() {
         let headers = header_map(&[]);
         let mut context = context(&headers);
         context.set_body(b"a=1&b=2").unwrap();
-        assert_eq!(context.body_processor(), BodyProcessor::UrlEncoded);
-        assert_eq!(extract(&context, Variable::ArgsPost(None)), vec!["1", "2"]);
+        assert_eq!(context.body_processor(), BodyProcessor::None);
+        assert!(extract(&context, Variable::ArgsPost(None)).is_empty());
+        assert_eq!(extract(&context, Variable::RequestBody), vec!["a=1&b=2"]);
     }
 
     #[test]
