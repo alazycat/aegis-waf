@@ -9,6 +9,7 @@ pub use crate::transforms::Transform;
 pub struct RegexSelector {
     pattern: String,
     regex: regex::Regex,
+    ignore_case: regex::Regex,
 }
 
 impl RegexSelector {
@@ -16,6 +17,9 @@ impl RegexSelector {
         Ok(Self {
             pattern: pattern.to_string(),
             regex: regex::Regex::new(pattern)?,
+            ignore_case: regex::RegexBuilder::new(pattern)
+                .case_insensitive(true)
+                .build()?,
         })
     }
 
@@ -25,6 +29,10 @@ impl RegexSelector {
 
     pub fn is_match(&self, key: &str) -> bool {
         self.regex.is_match(key)
+    }
+
+    pub fn is_match_ignore_case(&self, key: &str) -> bool {
+        self.ignore_case.is_match(key)
     }
 }
 

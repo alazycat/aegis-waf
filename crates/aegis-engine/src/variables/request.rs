@@ -634,7 +634,7 @@ impl RequestContext {
             Variable::Tx(selector) => self
                 .tx
                 .iter()
-                .filter(|(name, _)| name_matches(selector, name))
+                .filter(|(name, _)| tx_name_matches(selector, name))
                 .map(|(name, value)| VariableEntry::item("TX", name, value.to_string()))
                 .collect(),
             Variable::Count(inner) => {
@@ -716,6 +716,14 @@ fn name_matches(selector: &Option<Selector>, name: &str) -> bool {
         .as_ref()
         .map(|selector| selector.matches(name))
         .unwrap_or(true)
+}
+
+fn tx_name_matches(selector: &Option<Selector>, name: &str) -> bool {
+    match selector {
+        None => true,
+        Some(Selector::Literal(value)) => name.eq_ignore_ascii_case(value),
+        Some(Selector::Regex(regex)) => regex.is_match_ignore_case(name),
+    }
 }
 
 fn unique_names(pairs: &[(String, String)]) -> Vec<String> {
@@ -1344,6 +1352,22 @@ mod tests {
         context.set_body(body).unwrap();
         assert_eq!(extract(&context, Variable::Files), vec!["fi;le"]);
         assert_eq!(extract(&context, Variable::FilesNames), vec!["te;st.txt"]);
+    }
+
+    #[test]
+    fn tx_regex_selector_is_case_insensitive() {
+        let headers = header_map(&[]);
+        let mut context = context(&headers);
+        context.tx_mut().set(
+            "multipart_headers_content_types_1",
+            "text/plain".to_string(),
+        );
+        let selector =
+            Selector::Regex(RegexSelector::new("MULTIPART_HEADERS_CONTENT_TYPES_*").unwrap());
+        assert_eq!(
+            extract(&context, Variable::Tx(Some(selector))),
+            vec!["text/plain"]
+        );
     }
 
     #[test]
