@@ -357,15 +357,37 @@ fn css_decode(input: &str) -> Cow<'_, str> {
 }
 
 fn cmd_line(input: &str) -> Cow<'_, str> {
-    if !input.contains(['\\', '"', '\'', '^']) {
+    let needs_normalization = input.chars().any(|ch| {
+        ch.is_ascii_uppercase()
+            || ch.is_whitespace()
+            || matches!(ch, '\\' | '"' | '\'' | '^' | ',' | ';')
+    });
+    if !needs_normalization {
         return Cow::Borrowed(input);
     }
-    Cow::Owned(
-        input
-            .chars()
-            .filter(|ch| !matches!(ch, '\\' | '"' | '\'' | '^'))
-            .collect(),
-    )
+    let mut output = String::with_capacity(input.len());
+    let mut pending_space = false;
+    for ch in input.chars() {
+        if matches!(ch, '\\' | '"' | '\'' | '^') {
+            continue;
+        }
+        let ch = match ch {
+            ',' | ';' => ' ',
+            other => other,
+        };
+        if ch.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        if pending_space {
+            if ch != '/' && ch != '(' && !output.is_empty() {
+                output.push(' ');
+            }
+            pending_space = false;
+        }
+        output.push(ch.to_ascii_lowercase());
+    }
+    Cow::Owned(output)
 }
 
 fn utf8_to_unicode(input: &str) -> Cow<'_, str> {
@@ -489,6 +511,19 @@ mod tests {
     }
 
     #[test]
+    fn cmd_line_matches_modsecurity() {
+        assert_eq!(
+            Transform::CmdLine.apply("for %variable in (set) do command"),
+            "for %variable in(set) do command"
+        );
+        assert_eq!(
+            Transform::CmdLine.apply(r#""C:\Windows\CMD.EXE" /C DIR"#),
+            "c:windowscmd.exe/c dir"
+        );
+        assert_eq!(Transform::CmdLine.apply("a , b ; c\t\td"), "a b c d");
+    }
+
+    #[test]
     fn lowercase_and_trim() {
         assert_eq!(Transform::Lowercase.apply("AbC"), "abc");
         assert_eq!(Transform::Trim.apply("  a b  "), "a b");
@@ -543,7 +578,7 @@ mod tests {
     fn normalize_command_line_and_comments() {
         assert_eq!(
             Transform::CmdLine.apply(r#"c^m\d /c "whoami""#),
-            "cmd /c whoami"
+            "cmd/c whoami"
         );
         assert_eq!(Transform::RemoveWhitespace.apply("a b\tc"), "abc");
         assert_eq!(Transform::ReplaceComments.apply("a/*x*/b"), "a b");
