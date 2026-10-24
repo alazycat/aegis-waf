@@ -86,8 +86,15 @@ impl EvaluationState {
         }
     }
 
-    pub fn set_body(&mut self, body: &[u8]) {
-        self.context.set_body(body);
+    pub fn set_parse_limits(&mut self, limits: crate::variables::request::ParseLimits) {
+        self.context.set_parse_limits(limits);
+    }
+
+    pub fn set_body(
+        &mut self,
+        body: &[u8],
+    ) -> Result<(), crate::variables::request::BodyParseError> {
+        self.context.set_body(body)
     }
 
     pub fn set_response_headers(&mut self, status: u16, headers: &http::HeaderMap) {
@@ -649,7 +656,7 @@ pub fn evaluate(rules: &CompiledRules, view: &RequestView<'_>) -> Evaluation {
     let mut state = EvaluationState::new(view);
     state.evaluate_phase(rules, Phase::Phase1);
     if !state.decision().is_decisive() {
-        state.set_body(view.body);
+        let _ = state.set_body(view.body);
         state.evaluate_phase(rules, Phase::Phase2);
     }
     state.finish(started)

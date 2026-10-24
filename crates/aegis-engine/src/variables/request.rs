@@ -56,6 +56,41 @@ struct MultipartPart {
     data: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseLimits {
+    pub max_args: usize,
+    pub max_multipart_parts: usize,
+    pub max_multipart_part_headers: usize,
+    pub max_xml_depth: usize,
+    pub max_xml_values: usize,
+}
+
+impl Default for ParseLimits {
+    fn default() -> Self {
+        Self {
+            max_args: 10_000,
+            max_multipart_parts: 1_000,
+            max_multipart_part_headers: 64,
+            max_xml_depth: 64,
+            max_xml_values: 10_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BodyParseError {
+    #[error("too many request arguments")]
+    TooManyArgs,
+    #[error("too many multipart parts")]
+    TooManyMultipartParts,
+    #[error("too many multipart part headers")]
+    TooManyMultipartHeaders,
+    #[error("xml nesting too deep")]
+    XmlTooDeep,
+    #[error("too many xml values")]
+    TooManyXmlValues,
+}
+
 #[derive(Debug, Clone)]
 pub struct RequestContext {
     method: String,
@@ -84,6 +119,7 @@ pub struct RequestContext {
     collections: SharedCollectionStore,
     collection_keys: HashMap<String, String>,
     matched_entries: Vec<VariableEntry>,
+    parse_limits: ParseLimits,
     cache: RefCell<HashMap<Variable, Arc<Vec<VariableEntry>>>>,
 }
 
@@ -144,6 +180,7 @@ impl RequestContext {
             collections,
             collection_keys: HashMap::new(),
             matched_entries: Vec::new(),
+            parse_limits: ParseLimits::default(),
             cache: RefCell::new(HashMap::new()),
         }
     }
@@ -200,7 +237,11 @@ impl RequestContext {
         self.collections.entries(&collection, key)
     }
 
-    pub fn set_body(&mut self, body: &[u8]) {
+    pub fn set_parse_limits(&mut self, limits: ParseLimits) {
+        self.parse_limits = limits;
+    }
+
+    pub fn set_body(&mut self, body: &[u8]) -> Result<(), BodyParseError> {
         self.body_len = body.len();
         self.body_text = String::from_utf8_lossy(body).into_owned();
         self.body_processor = self
@@ -209,35 +250,48 @@ impl RequestContext {
         self.body_pairs = Vec::new();
         self.multipart_parts = Vec::new();
         self.xml_values = Vec::new();
+        self.cache.borrow_mut().clear();
 
-        match self.body_processor {
+        let result = match self.body_processor {
             BodyProcessor::UrlEncoded => {
-                self.body_pairs = form_urlencoded::parse(body)
-                    .map(|(name, value)| (name.into_owned(), value.into_owned()))
-                    .collect();
+                let mut pairs = Vec::new();
+                for (name, value) in form_urlencoded::parse(body) {
+                    if pairs.len() >= self.parse_limits.max_args {
+                        return Err(BodyParseError::TooManyArgs);
+                    }
+                    pairs.push((name.into_owned(), value.into_owned()));
+                }
+                self.body_pairs = pairs;
+                Ok(())
             }
             BodyProcessor::Multipart => {
                 if let Some(boundary) = multipart_boundary(&self.headers) {
-                    self.multipart_parts = parse_multipart(body, &boundary);
-                    self.body_pairs = self
-                        .multipart_parts
-                        .iter()
-                        .filter(|part| part.filename.is_none())
-                        .map(|part| {
-                            (
+                    let parts = parse_multipart(body, &boundary, &self.parse_limits)?;
+                    let mut body_pairs = Vec::new();
+                    for part in &parts {
+                        if part.filename.is_none() {
+                            if body_pairs.len() >= self.parse_limits.max_args {
+                                return Err(BodyParseError::TooManyArgs);
+                            }
+                            body_pairs.push((
                                 part.name.clone(),
                                 String::from_utf8_lossy(&part.data).into_owned(),
-                            )
-                        })
-                        .collect();
+                            ));
+                        }
+                    }
+                    self.multipart_parts = parts;
+                    self.body_pairs = body_pairs;
                 }
+                Ok(())
             }
             BodyProcessor::Xml => {
-                self.xml_values = extract_xml_values(&self.body_text);
+                self.xml_values = extract_xml_values(&self.body_text, &self.parse_limits)?;
+                Ok(())
             }
-            BodyProcessor::Json | BodyProcessor::None => {}
-        }
+            BodyProcessor::Json | BodyProcessor::None => Ok(()),
+        };
         self.cache.borrow_mut().clear();
+        result
     }
 
     pub fn set_body_processor_override(&mut self, processor: BodyProcessor) {
@@ -661,16 +715,25 @@ fn multipart_boundary(headers: &[(String, String)]) -> Option<String> {
         .filter(|boundary| !boundary.is_empty())
 }
 
-fn parse_multipart(body: &[u8], boundary: &str) -> Vec<MultipartPart> {
+fn parse_multipart(
+    body: &[u8],
+    boundary: &str,
+    limits: &ParseLimits,
+) -> Result<Vec<MultipartPart>, BodyParseError> {
     let delimiter = format!("--{boundary}").into_bytes();
     let next_delimiter = format!("\r\n--{boundary}").into_bytes();
     let mut parts = Vec::new();
+    let mut part_count = 0usize;
     let mut position = 0usize;
 
     while let Some(start) = find_subslice(&body[position..], &delimiter) {
         let mut cursor = position + start + delimiter.len();
         if body.get(cursor..cursor + 2) == Some(b"--") {
             break;
+        }
+        part_count += 1;
+        if part_count > limits.max_multipart_parts {
+            return Err(BodyParseError::TooManyMultipartParts);
         }
         if body.get(cursor..cursor + 2) == Some(b"\r\n") {
             cursor += 2;
@@ -681,6 +744,15 @@ fn parse_multipart(body: &[u8], boundary: &str) -> Vec<MultipartPart> {
             break;
         };
         let headers_text = String::from_utf8_lossy(&body[cursor..cursor + header_end]);
+        let headers: Vec<String> = headers_text
+            .lines()
+            .map(str::trim_end)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect();
+        if headers.len() > limits.max_multipart_part_headers {
+            return Err(BodyParseError::TooManyMultipartHeaders);
+        }
         let data_start = cursor + header_end + 4;
         let Some(next) = find_subslice(&body[data_start..], &next_delimiter) else {
             break;
@@ -690,18 +762,13 @@ fn parse_multipart(body: &[u8], boundary: &str) -> Vec<MultipartPart> {
             parts.push(MultipartPart {
                 name,
                 filename,
-                headers: headers_text
-                    .lines()
-                    .map(str::trim_end)
-                    .filter(|line| !line.is_empty())
-                    .map(str::to_string)
-                    .collect(),
+                headers,
                 data: body[data_start..data_end].to_vec(),
             });
         }
         position = data_end + 2;
     }
-    parts
+    Ok(parts)
 }
 
 fn parse_part_disposition(headers: &str) -> Option<(String, Option<String>)> {
@@ -731,27 +798,37 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn extract_xml_values(text: &str) -> Vec<String> {
+fn extract_xml_values(text: &str, limits: &ParseLimits) -> Result<Vec<String>, BodyParseError> {
     let Ok(document) = roxmltree::Document::parse(text) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut values = Vec::new();
     for node in document.descendants() {
+        let depth = node.ancestors().filter(|node| node.is_element()).count();
+        if depth > limits.max_xml_depth {
+            return Err(BodyParseError::XmlTooDeep);
+        }
         for child in node.children() {
             if child.is_text() {
                 if let Some(text) = child.text() {
                     let text = text.trim();
                     if !text.is_empty() {
+                        if values.len() >= limits.max_xml_values {
+                            return Err(BodyParseError::TooManyXmlValues);
+                        }
                         values.push(text.to_string());
                     }
                 }
             }
         }
         for attribute in node.attributes() {
+            if values.len() >= limits.max_xml_values {
+                return Err(BodyParseError::TooManyXmlValues);
+            }
             values.push(attribute.value().to_string());
         }
     }
-    values
+    Ok(values)
 }
 
 #[cfg(test)]
@@ -859,7 +936,7 @@ mod tests {
     fn extracts_args_get_names_and_combined_size() {
         let headers = header_map(&[("content-type", "application/x-www-form-urlencoded")]);
         let mut context = context(&headers);
-        context.set_body(b"x=1");
+        context.set_body(b"x=1").unwrap();
         assert_eq!(extract(&context, Variable::ArgsGetNames), vec!["q", "page"]);
         assert_eq!(extract(&context, Variable::ArgsCombinedSize), vec!["16"]);
     }
@@ -868,7 +945,7 @@ mod tests {
     fn extracts_form_body_only_for_urlencoded() {
         let headers = header_map(&[("content-type", "application/x-www-form-urlencoded")]);
         let mut context = context(&headers);
-        context.set_body(b"user=admin&token=a%20b");
+        context.set_body(b"user=admin&token=a%20b").unwrap();
         assert_eq!(
             extract(&context, Variable::ArgsPost(None)),
             vec!["admin", "a b"]
@@ -883,7 +960,7 @@ mod tests {
     fn does_not_parse_multipart_body() {
         let headers = header_map(&[("content-type", "multipart/form-data; boundary=x")]);
         let mut context = context(&headers);
-        context.set_body(b"user=admin");
+        context.set_body(b"user=admin").unwrap();
         assert!(extract(&context, Variable::ArgsPost(None)).is_empty());
         assert_eq!(extract(&context, Variable::RequestBody), vec!["user=admin"]);
     }
@@ -954,7 +1031,7 @@ mod tests {
     fn extracts_lossy_request_body() {
         let headers = header_map(&[]);
         let mut context = context(&headers);
-        context.set_body(&[0x66, 0x6f, 0x80, 0x6f]);
+        context.set_body(&[0x66, 0x6f, 0x80, 0x6f]).unwrap();
         assert_eq!(
             extract(&context, Variable::RequestBody),
             vec!["fo\u{fffd}o"]
@@ -990,7 +1067,7 @@ mod tests {
             vec!["session", "theme"]
         );
         assert_eq!(extract(&context, Variable::RequestBodyLength), vec!["0"]);
-        context.set_body(b"abc");
+        context.set_body(b"abc").unwrap();
         assert_eq!(extract(&context, Variable::RequestBodyLength), vec!["3"]);
     }
 
@@ -998,7 +1075,7 @@ mod tests {
     fn extracts_args_selectors() {
         let headers = header_map(&[("content-type", "application/x-www-form-urlencoded")]);
         let mut context = context(&headers);
-        context.set_body(b"q=body&x=1");
+        context.set_body(b"q=body&x=1").unwrap();
         assert_eq!(
             extract(
                 &context,
@@ -1026,7 +1103,9 @@ mod tests {
     fn extracts_xml_values() {
         let headers = header_map(&[("content-type", "application/xml")]);
         let mut context = context(&headers);
-        context.set_body(b"<root><a>attack</a><b x=\"y\"/></root>");
+        context
+            .set_body(b"<root><a>attack</a><b x=\"y\"/></root>")
+            .unwrap();
         let values = extract(
             &context,
             Variable::Xml(Some(Selector::Literal("/*".into()))),
@@ -1065,7 +1144,7 @@ mod tests {
         let headers = header_map(&[("content-type", "multipart/form-data; boundary=X")]);
         let mut context = context(&headers);
         let body = b"--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nfile-content\r\n--X\r\nContent-Disposition: form-data; name=\"field\"\r\n\r\nvalue\r\n--X--\r\n";
-        context.set_body(body);
+        context.set_body(body).unwrap();
         assert_eq!(extract(&context, Variable::Files), vec!["file-content"]);
         assert_eq!(extract(&context, Variable::FilesNames), vec!["file"]);
         assert_eq!(extract(&context, Variable::FilesSizes), vec!["12"]);
@@ -1078,7 +1157,7 @@ mod tests {
         let headers = header_map(&[("content-type", "multipart/form-data; boundary=X")]);
         let mut context = context(&headers);
         let body = b"--X\r\nContent-Disposition: form-data; name=\"_charset_\"\r\nContent-Type: text/plain\r\n\r\nUTF-8\r\n--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\nfile-content\r\n--X--\r\n";
-        context.set_body(body);
+        context.set_body(body).unwrap();
         let part_headers = context.extract(&Variable::MultipartPartHeaders(None));
         assert!(part_headers
             .iter()
@@ -1096,7 +1175,7 @@ mod tests {
     fn derives_request_body_processor() {
         let headers = header_map(&[("content-type", "application/json")]);
         let mut context = context(&headers);
-        context.set_body(b"{\"a\":1}");
+        context.set_body(b"{\"a\":1}").unwrap();
         assert_eq!(context.body_processor(), BodyProcessor::Json);
         assert!(extract(&context, Variable::ArgsPost(None)).is_empty());
         assert_eq!(extract(&context, Variable::ReqbodyProcessor), vec!["JSON"]);
@@ -1106,7 +1185,7 @@ mod tests {
     fn missing_content_type_defaults_to_urlencoded() {
         let headers = header_map(&[]);
         let mut context = context(&headers);
-        context.set_body(b"a=1&b=2");
+        context.set_body(b"a=1&b=2").unwrap();
         assert_eq!(context.body_processor(), BodyProcessor::UrlEncoded);
         assert_eq!(extract(&context, Variable::ArgsPost(None)), vec!["1", "2"]);
     }
@@ -1119,8 +1198,104 @@ mod tests {
         let second = context.extract(&Variable::ArgsGet(None));
         assert!(Arc::ptr_eq(&first, &second));
 
-        context.set_body(b"q=body");
+        context.set_body(b"q=body").unwrap();
         let after = context.extract(&Variable::ArgsGet(None));
         assert!(!Arc::ptr_eq(&first, &after));
+    }
+
+    #[test]
+    fn urlencoded_body_over_max_args_is_rejected() {
+        let headers = header_map(&[("content-type", "application/x-www-form-urlencoded")]);
+        let mut context = context(&headers);
+        context.set_parse_limits(ParseLimits {
+            max_args: 2,
+            ..ParseLimits::default()
+        });
+        assert!(context.set_body(b"a=1&b=2").is_ok());
+        assert_eq!(
+            context.set_body(b"a=1&b=2&c=3"),
+            Err(BodyParseError::TooManyArgs)
+        );
+    }
+
+    #[test]
+    fn multipart_part_count_limit_is_enforced() {
+        let headers = header_map(&[("content-type", "multipart/form-data; boundary=X")]);
+        let mut context = context(&headers);
+        context.set_parse_limits(ParseLimits {
+            max_multipart_parts: 1,
+            ..ParseLimits::default()
+        });
+        let one_part = b"--X\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--X--\r\n";
+        assert!(context.set_body(one_part).is_ok());
+        let two_parts = b"--X\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--X\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\n2\r\n--X--\r\n";
+        assert_eq!(
+            context.set_body(two_parts),
+            Err(BodyParseError::TooManyMultipartParts)
+        );
+    }
+
+    #[test]
+    fn multipart_header_count_limit_is_enforced() {
+        let headers = header_map(&[("content-type", "multipart/form-data; boundary=X")]);
+        let mut context = context(&headers);
+        context.set_parse_limits(ParseLimits {
+            max_multipart_part_headers: 2,
+            ..ParseLimits::default()
+        });
+        let body = b"--X\r\nContent-Disposition: form-data; name=\"a\"\r\nContent-Type: text/plain\r\nX-Test: 1\r\n\r\nvalue\r\n--X--\r\n";
+        assert_eq!(
+            context.set_body(body),
+            Err(BodyParseError::TooManyMultipartHeaders)
+        );
+    }
+
+    #[test]
+    fn xml_depth_limit_is_enforced() {
+        let headers = header_map(&[("content-type", "application/xml")]);
+        let mut context = context(&headers);
+        context.set_parse_limits(ParseLimits {
+            max_xml_depth: 2,
+            ..ParseLimits::default()
+        });
+        assert_eq!(
+            context.set_body(b"<a><b><c>x</c></b></a>"),
+            Err(BodyParseError::XmlTooDeep)
+        );
+        context.set_parse_limits(ParseLimits {
+            max_xml_depth: 3,
+            ..ParseLimits::default()
+        });
+        assert!(context.set_body(b"<a><b><c>x</c></b></a>").is_ok());
+    }
+
+    #[test]
+    fn xml_value_count_limit_is_enforced() {
+        let headers = header_map(&[("content-type", "application/xml")]);
+        let mut context = context(&headers);
+        context.set_parse_limits(ParseLimits {
+            max_xml_values: 1,
+            ..ParseLimits::default()
+        });
+        assert_eq!(
+            context.set_body(b"<a><b>1</b><b>2</b></a>"),
+            Err(BodyParseError::TooManyXmlValues)
+        );
+        context.set_parse_limits(ParseLimits {
+            max_xml_values: 2,
+            ..ParseLimits::default()
+        });
+        assert!(context.set_body(b"<a><b>1</b><b>2</b></a>").is_ok());
+    }
+
+    #[test]
+    fn json_body_ignores_parse_limits() {
+        let headers = header_map(&[("content-type", "application/json")]);
+        let mut context = context(&headers);
+        context.set_parse_limits(ParseLimits {
+            max_args: 1,
+            ..ParseLimits::default()
+        });
+        assert!(context.set_body(b"{\"a\":1,\"b\":2}").is_ok());
     }
 }
