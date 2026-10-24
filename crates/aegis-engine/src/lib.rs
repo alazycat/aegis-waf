@@ -17,5 +17,6 @@ pub use collections::{CollectionStore, MemoryCollectionStore, SharedCollectionSt
 pub use compile::{load_rules, LoadOptions};
 pub use error::{EngineError, LoadError};
 pub use eval::{evaluate, evaluate_phase, Decision, Evaluation, EvaluationState, RuleMatch};
+pub use model::Selector;
 pub use model::{CompiledRules, Phase};
 pub use variables::request::{RequestContext, RequestView};

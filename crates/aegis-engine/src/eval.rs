@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::collections::SharedCollectionStore;
@@ -7,8 +6,9 @@ use crate::error::EngineError;
 use crate::model::{
     CompiledOperator, CompiledRule, CompiledRules, CtlAction, Disruptive, Phase, Prefilter,
     PrefilterHits, PrefilterVariant, RuleEngineMode, RuleGroup, SetVar, SetVarOp, SetVarScope,
+    VariableSpec,
 };
-use crate::variables::request::{RequestContext, RequestView};
+use crate::variables::request::{RequestContext, RequestView, VariableEntry};
 use crate::variables::tx::expand_macros_with_remote;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,29 +212,18 @@ impl EvaluationState {
                 captures: Vec::new(),
             });
         }
-        let excluded_arcs: Vec<Arc<Vec<String>>> = rule
-            .variables
-            .iter()
-            .filter(|spec| spec.negated)
-            .map(|spec| self.context.extract(&spec.variable))
-            .collect();
-        let excluded: HashSet<&str> = excluded_arcs
-            .iter()
-            .flat_map(|values| values.iter().map(String::as_str))
-            .collect();
-
         for spec in rule.variables.iter().filter(|spec| !spec.negated) {
-            let values = self.context.extract(&spec.variable);
-            for value in values.iter() {
-                if excluded.contains(value.as_str()) {
+            let entries = self.context.extract(&spec.variable);
+            for entry in entries.iter() {
+                if self.entry_excluded(rule, spec, entry) {
                     continue;
                 }
                 let matched_value;
                 let matched = if rule.transformations.is_empty() {
-                    matched_value = value.clone();
-                    rule.operator.matches(value)
+                    matched_value = entry.value.clone();
+                    rule.operator.matches(&entry.value)
                 } else {
-                    let mut current = value.clone();
+                    let mut current = entry.value.clone();
                     let mut next = String::new();
                     for transform in &rule.transformations {
                         let result = transform.apply(&current);
@@ -258,13 +247,35 @@ impl EvaluationState {
                     };
                     return Some(RuleHit {
                         value: matched_value,
-                        variable_name: spec.variable.display_name(),
+                        variable_name: entry.name.clone(),
                         captures,
                     });
                 }
             }
         }
         None
+    }
+
+    fn entry_excluded(
+        &self,
+        rule: &CompiledRule,
+        spec: &VariableSpec,
+        entry: &VariableEntry,
+    ) -> bool {
+        rule.variables
+            .iter()
+            .filter(|spec| spec.negated)
+            .any(|negated| {
+                negated.variable.same_family(&spec.variable)
+                    && match negated.variable.selector() {
+                        None => true,
+                        Some(selector) => entry
+                            .key
+                            .as_deref()
+                            .map(|key| selector.matches(key))
+                            .unwrap_or(false),
+                    }
+            })
     }
 
     fn apply_hit_context(&mut self, rule: &CompiledRule, hit: &RuleHit) {
@@ -723,7 +734,7 @@ SecRule TX:SCORE "@ge 5" "id:3002,phase:2,deny,status:403,msg:'score=%{tx.score}
     }
 
     #[test]
-    fn negated_variables_exclude_values() {
+    fn negated_variables_exclude_items_by_name() {
         let rules = load(
             r#"SecRule REQUEST_HEADERS|!REQUEST_HEADERS:User-Agent "@contains evil" "id:4001,phase:1,deny""#,
         );
@@ -742,7 +753,7 @@ SecRule TX:SCORE "@ge 5" "id:3002,phase:2,deny,status:403,msg:'score=%{tx.score}
             &rules,
             "GET",
             "/",
-            &[("user-agent", "evil"), ("x-other", "evil")],
+            &[("user-agent", "evil"), ("x-other", "safe")],
             b"",
         );
         assert_eq!(excluded.decision, Decision::Pass);
@@ -1244,6 +1255,33 @@ SecRule MATCHED_VARS "@contains ARGS" "id:9502,phase:1,deny,status:403"
         assert!(matches!(
             evaluation.decision,
             Decision::Block { rule_id: 9502, .. }
+        ));
+    }
+
+    #[test]
+    fn negated_targets_exclude_items_by_name() {
+        let rules = load(r#"SecRule ARGS|!ARGS:allow "@contains attack" "id:4101,phase:1,deny""#);
+        let blocked = eval(&rules, "GET", "/?allow=attack", &[], b"");
+        assert_eq!(blocked.decision, Decision::Pass);
+        let still_blocked = eval(&rules, "GET", "/?allow=attack&other=attack", &[], b"");
+        assert!(matches!(
+            still_blocked.decision,
+            Decision::Block { rule_id: 4101, .. }
+        ));
+    }
+
+    #[test]
+    fn matched_var_name_uses_collection_key() {
+        let rules = load(
+            r#"
+SecRule ARGS "@contains attack" "id:4201,phase:1,pass,setvar:tx.seen=%{MATCHED_VAR_NAME}"
+SecRule TX:SEEN "@contains ARGS:q" "id:4202,phase:1,deny,status:403"
+"#,
+        );
+        let evaluation = eval(&rules, "GET", "/?q=attack", &[], b"");
+        assert!(matches!(
+            evaluation.decision,
+            Decision::Block { rule_id: 4202, .. }
         ));
     }
 

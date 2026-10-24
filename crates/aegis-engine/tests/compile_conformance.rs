@@ -1,7 +1,7 @@
 use std::fs;
 
 use aegis_engine::compile::{load_rules, LoadOptions};
-use aegis_engine::model::{CompiledOperator, Phase, RuleGroup, Variable};
+use aegis_engine::model::{CompiledOperator, Phase, RuleGroup, Selector, Variable};
 use tempfile::tempdir;
 
 fn load(text: &str) -> Result<aegis_engine::model::CompiledRules, aegis_engine::LoadError> {
@@ -61,7 +61,7 @@ fn compiles_multiple_variables_and_negation() {
     assert!(rule.variables[1].negated);
     assert!(matches!(
         &rule.variables[1].variable,
-        Variable::RequestHeaders(Some(name)) if name == "User-Agent"
+        Variable::RequestHeaders(Some(Selector::Literal(name))) if name == "User-Agent"
     ));
 }
 

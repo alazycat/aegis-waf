@@ -6,7 +6,7 @@ use std::sync::Arc;
 use http::HeaderMap;
 
 use crate::collections::{MemoryCollectionStore, SharedCollectionStore};
-use crate::model::{PrefilterScope, Variable};
+use crate::model::{PrefilterScope, Selector, Variable};
 
 use super::tx::TxStore;
 
@@ -20,6 +20,31 @@ pub struct RequestView<'a> {
     pub headers: &'a HeaderMap,
     pub body: &'a [u8],
     pub remote_addr: IpAddr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariableEntry {
+    pub name: String,
+    pub key: Option<String>,
+    pub value: String,
+}
+
+impl VariableEntry {
+    fn scalar(variable: &Variable, value: String) -> Self {
+        Self {
+            name: variable.display_name(),
+            key: None,
+            value,
+        }
+    }
+
+    fn item(prefix: &str, key: &str, value: String) -> Self {
+        Self {
+            name: format!("{prefix}:{key}"),
+            key: Some(key.to_string()),
+            value,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -53,7 +78,7 @@ pub struct RequestContext {
     tx: TxStore,
     collections: SharedCollectionStore,
     collection_keys: HashMap<String, String>,
-    cache: RefCell<HashMap<Variable, Arc<Vec<String>>>>,
+    cache: RefCell<HashMap<Variable, Arc<Vec<VariableEntry>>>>,
 }
 
 impl RequestContext {
@@ -230,13 +255,13 @@ impl RequestContext {
         &mut self.tx
     }
 
-    pub fn extract(&self, variable: &Variable) -> Arc<Vec<String>> {
+    pub fn extract(&self, variable: &Variable) -> Arc<Vec<VariableEntry>> {
         let cacheable = !matches!(
             variable,
             Variable::Tx(_)
                 | Variable::MatchedVar
                 | Variable::MatchedVarName
-                | Variable::MatchedVars
+                | Variable::MatchedVars(_)
                 | Variable::Ip(_)
                 | Variable::Session(_)
                 | Variable::User(_)
@@ -256,168 +281,180 @@ impl RequestContext {
         values
     }
 
-    fn compute(&self, variable: &Variable) -> Vec<String> {
+    fn compute(&self, variable: &Variable) -> Vec<VariableEntry> {
         match variable {
-            Variable::RequestUri | Variable::RequestUriRaw => vec![self.uri.clone()],
-            Variable::RequestLine => {
-                vec![format!("{} {} {}", self.method, self.uri, self.protocol)]
+            Variable::RequestUri | Variable::RequestUriRaw => {
+                vec![VariableEntry::scalar(variable, self.uri.clone())]
             }
-            Variable::RequestProtocol => vec![self.protocol.clone()],
-            Variable::RequestBasename => vec![self
-                .path
-                .rsplit('/')
-                .find(|segment| !segment.is_empty())
-                .unwrap_or("")
-                .to_string()],
-            Variable::RequestMethod => vec![self.method.clone()],
-            Variable::QueryString => vec![self.query.clone().unwrap_or_default()],
-            Variable::RequestFilename => vec![self.path.clone()],
-            Variable::RequestHeaders(None) => self
+            Variable::RequestLine => vec![VariableEntry::scalar(
+                variable,
+                format!("{} {} {}", self.method, self.uri, self.protocol),
+            )],
+            Variable::RequestProtocol => {
+                vec![VariableEntry::scalar(variable, self.protocol.clone())]
+            }
+            Variable::RequestBasename => vec![VariableEntry::scalar(
+                variable,
+                self.path
+                    .rsplit('/')
+                    .find(|segment| !segment.is_empty())
+                    .unwrap_or("")
+                    .to_string(),
+            )],
+            Variable::RequestMethod => vec![VariableEntry::scalar(variable, self.method.clone())],
+            Variable::QueryString => vec![VariableEntry::scalar(
+                variable,
+                self.query.clone().unwrap_or_default(),
+            )],
+            Variable::RequestFilename => vec![VariableEntry::scalar(variable, self.path.clone())],
+            Variable::RequestHeaders(selector) => self
                 .headers
                 .iter()
-                .map(|(_, value)| value.clone())
+                .filter(|(name, _)| name_matches(selector, name))
+                .map(|(name, value)| VariableEntry::item("REQUEST_HEADERS", name, value.clone()))
                 .collect(),
-            Variable::RequestHeaders(Some(name)) => {
-                let name = name.to_ascii_lowercase();
-                self.headers
-                    .iter()
-                    .filter(|(header, _)| *header == name)
-                    .map(|(_, value)| value.clone())
-                    .collect()
-            }
-            Variable::RequestHeadersNames => unique_names(&self.headers),
+            Variable::RequestHeadersNames => unique_names(&self.headers)
+                .into_iter()
+                .map(|name| VariableEntry::item("REQUEST_HEADERS_NAMES", &name, name.clone()))
+                .collect(),
             Variable::Args(selector) => self
                 .query_pairs
                 .iter()
                 .chain(self.body_pairs.iter())
-                .filter(|(name, _)| {
-                    selector
-                        .as_ref()
-                        .map(|selector| name.eq_ignore_ascii_case(selector))
-                        .unwrap_or(true)
-                })
-                .map(|(_, value)| value.clone())
+                .filter(|(name, _)| name_matches(selector, name))
+                .map(|(name, value)| VariableEntry::item("ARGS", name, value.clone()))
                 .collect(),
             Variable::ArgsGet(selector) => self
                 .query_pairs
                 .iter()
-                .filter(|(name, _)| {
-                    selector
-                        .as_ref()
-                        .map(|selector| name.eq_ignore_ascii_case(selector))
-                        .unwrap_or(true)
-                })
-                .map(|(_, value)| value.clone())
+                .filter(|(name, _)| name_matches(selector, name))
+                .map(|(name, value)| VariableEntry::item("ARGS_GET", name, value.clone()))
                 .collect(),
             Variable::ArgsPost(selector) => self
                 .body_pairs
                 .iter()
-                .filter(|(name, _)| {
-                    selector
-                        .as_ref()
-                        .map(|selector| name.eq_ignore_ascii_case(selector))
-                        .unwrap_or(true)
-                })
-                .map(|(_, value)| value.clone())
+                .filter(|(name, _)| name_matches(selector, name))
+                .map(|(name, value)| VariableEntry::item("ARGS_POST", name, value.clone()))
                 .collect(),
             Variable::ArgsNames => self
                 .query_pairs
                 .iter()
                 .chain(self.body_pairs.iter())
-                .map(|(name, _)| name.clone())
+                .map(|(name, _)| VariableEntry::item("ARGS_NAMES", name, name.clone()))
                 .collect(),
-            Variable::RequestCookies(None) => self
+            Variable::RequestCookies(selector) => self
                 .cookies
                 .iter()
-                .map(|(_, value)| value.clone())
+                .filter(|(name, _)| name_matches(selector, name))
+                .map(|(name, value)| VariableEntry::item("REQUEST_COOKIES", name, value.clone()))
                 .collect(),
-            Variable::RequestCookies(Some(name)) => self
-                .cookies
-                .iter()
-                .filter(|(cookie, _)| cookie.eq_ignore_ascii_case(name))
-                .map(|(_, value)| value.clone())
+            Variable::RequestCookiesNames => unique_names(&self.cookies)
+                .into_iter()
+                .map(|name| VariableEntry::item("REQUEST_COOKIES_NAMES", &name, name.clone()))
                 .collect(),
-            Variable::RequestCookiesNames => unique_names(&self.cookies),
-            Variable::RequestBody => vec![self.body_text.clone()],
-            Variable::RequestBodyLength => vec![self.body_len.to_string()],
+            Variable::RequestBody => vec![VariableEntry::scalar(variable, self.body_text.clone())],
+            Variable::RequestBodyLength => {
+                vec![VariableEntry::scalar(variable, self.body_len.to_string())]
+            }
             Variable::Files => self
                 .multipart_parts
                 .iter()
                 .filter(|part| part.filename.is_some())
-                .map(|part| String::from_utf8_lossy(&part.data).into_owned())
+                .map(|part| {
+                    VariableEntry::item(
+                        "FILES",
+                        &part.name,
+                        String::from_utf8_lossy(&part.data).into_owned(),
+                    )
+                })
                 .collect(),
             Variable::FilesNames => self
                 .multipart_parts
                 .iter()
                 .filter(|part| part.filename.is_some())
-                .map(|part| part.name.clone())
+                .map(|part| VariableEntry::item("FILES_NAMES", &part.name, part.name.clone()))
                 .collect(),
             Variable::FilesSizes => self
                 .multipart_parts
                 .iter()
                 .filter(|part| part.filename.is_some())
-                .map(|part| part.data.len().to_string())
+                .map(|part| {
+                    VariableEntry::item("FILES_SIZES", &part.name, part.data.len().to_string())
+                })
                 .collect(),
-            Variable::FilesCombinedSize => vec![self
-                .multipart_parts
-                .iter()
-                .filter(|part| part.filename.is_some())
-                .map(|part| part.data.len())
-                .sum::<usize>()
-                .to_string()],
+            Variable::FilesCombinedSize => vec![VariableEntry::scalar(
+                variable,
+                self.multipart_parts
+                    .iter()
+                    .filter(|part| part.filename.is_some())
+                    .map(|part| part.data.len())
+                    .sum::<usize>()
+                    .to_string(),
+            )],
             Variable::FilesTmpnames => Vec::new(),
-            Variable::Ip(selector) => collection_values(self, "ip", selector),
-            Variable::Session(selector) => collection_values(self, "session", selector),
-            Variable::User(selector) => collection_values(self, "user", selector),
-            Variable::Global(selector) => collection_values(self, "global", selector),
-            Variable::RemoteAddr => vec![self.remote_addr.to_string()],
+            Variable::Ip(selector) => collection_entries(self, "ip", "IP", selector),
+            Variable::Session(selector) => collection_entries(self, "session", "SESSION", selector),
+            Variable::User(selector) => collection_entries(self, "user", "USER", selector),
+            Variable::Global(selector) => collection_entries(self, "global", "GLOBAL", selector),
+            Variable::RemoteAddr => {
+                vec![VariableEntry::scalar(
+                    variable,
+                    self.remote_addr.to_string(),
+                )]
+            }
             Variable::MatchedVar => self
                 .tx
                 .get("matched_var")
-                .map(|value| vec![value.to_string()])
+                .map(|value| vec![VariableEntry::scalar(variable, value.to_string())])
                 .unwrap_or_default(),
             Variable::MatchedVarName => self
                 .tx
                 .get("matched_var_name")
-                .map(|value| vec![value.to_string()])
+                .map(|value| vec![VariableEntry::scalar(variable, value.to_string())])
                 .unwrap_or_default(),
-            Variable::MatchedVars => self
+            Variable::MatchedVars(_) => self
                 .tx
                 .get("matched_var_name")
-                .map(|value| vec![value.to_string()])
+                .map(|value| vec![VariableEntry::scalar(variable, value.to_string())])
                 .unwrap_or_default(),
-            Variable::Xml(_) => self.xml_values.clone(),
+            Variable::Xml(_) => self
+                .xml_values
+                .iter()
+                .map(|value| VariableEntry::scalar(variable, value.clone()))
+                .collect(),
             Variable::ResponseStatus => self
                 .response_status
-                .map(|status| vec![status.to_string()])
+                .map(|status| vec![VariableEntry::scalar(variable, status.to_string())])
                 .unwrap_or_default(),
-            Variable::ResponseHeaders(None) => self
+            Variable::ResponseHeaders(selector) => self
                 .response_headers
                 .iter()
-                .map(|(_, value)| value.clone())
+                .filter(|(name, _)| name_matches(selector, name))
+                .map(|(name, value)| VariableEntry::item("RESPONSE_HEADERS", name, value.clone()))
                 .collect(),
-            Variable::ResponseHeaders(Some(name)) => {
-                let name = name.to_ascii_lowercase();
-                self.response_headers
-                    .iter()
-                    .filter(|(header, _)| *header == name)
-                    .map(|(_, value)| value.clone())
-                    .collect()
-            }
-            Variable::ResponseHeadersNames => unique_names(&self.response_headers),
-            Variable::ResponseBody => vec![self.response_body_text.clone()],
-            Variable::ResponseBodyLength => vec![self.response_body_len.to_string()],
+            Variable::ResponseHeadersNames => unique_names(&self.response_headers)
+                .into_iter()
+                .map(|name| VariableEntry::item("RESPONSE_HEADERS_NAMES", &name, name.clone()))
+                .collect(),
+            Variable::ResponseBody => vec![VariableEntry::scalar(
+                variable,
+                self.response_body_text.clone(),
+            )],
+            Variable::ResponseBodyLength => vec![VariableEntry::scalar(
+                variable,
+                self.response_body_len.to_string(),
+            )],
             Variable::ResponseContentType => self
                 .response_content_type
                 .clone()
-                .map(|value| vec![value])
+                .map(|value| vec![VariableEntry::scalar(variable, value)])
                 .unwrap_or_default(),
-            Variable::Tx(None) => self.tx.values().map(str::to_string).collect(),
-            Variable::Tx(Some(name)) => self
+            Variable::Tx(selector) => self
                 .tx
-                .get(name)
-                .map(|value| vec![value.to_string()])
-                .unwrap_or_default(),
+                .iter()
+                .filter(|(name, _)| name_matches(selector, name))
+                .map(|(name, value)| VariableEntry::item("TX", name, value.to_string()))
+                .collect(),
         }
     }
 
@@ -470,22 +507,25 @@ fn parse_cookies(value: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-fn collection_values(
+fn collection_entries(
     context: &RequestContext,
     collection: &str,
-    selector: &Option<String>,
-) -> Vec<String> {
-    match selector {
-        Some(name) => context
-            .collection_get(collection, name)
-            .map(|value| vec![value])
-            .unwrap_or_default(),
-        None => context
-            .collection_entries(collection)
-            .into_iter()
-            .map(|(_, value)| value)
-            .collect(),
-    }
+    prefix: &str,
+    selector: &Option<Selector>,
+) -> Vec<VariableEntry> {
+    context
+        .collection_entries(collection)
+        .into_iter()
+        .filter(|(name, _)| name_matches(selector, name))
+        .map(|(name, value)| VariableEntry::item(prefix, &name, value))
+        .collect()
+}
+
+fn name_matches(selector: &Option<Selector>, name: &str) -> bool {
+    selector
+        .as_ref()
+        .map(|selector| selector.matches(name))
+        .unwrap_or(true)
 }
 
 fn unique_names(pairs: &[(String, String)]) -> Vec<String> {
@@ -644,7 +684,23 @@ mod tests {
     }
 
     fn extract(context: &RequestContext, variable: Variable) -> Vec<String> {
-        context.extract(&variable).iter().cloned().collect()
+        context
+            .extract(&variable)
+            .iter()
+            .map(|entry| entry.value.clone())
+            .collect()
+    }
+
+    #[test]
+    fn entries_carry_precise_names_and_keys() {
+        let headers = header_map(&[]);
+        let context = context(&headers);
+        let entries = context.extract(&Variable::Args(None));
+        assert_eq!(entries[0].name, "ARGS:q");
+        assert_eq!(entries[0].key.as_deref(), Some("q"));
+        let names = context.extract(&Variable::ArgsNames);
+        assert_eq!(names[0].name, "ARGS_NAMES:q");
+        assert_eq!(names[0].value, "q");
     }
 
     #[test]
@@ -693,7 +749,10 @@ mod tests {
         let headers = header_map(&[("X-Test", "one"), ("x-test", "two")]);
         let context = context(&headers);
         assert_eq!(
-            extract(&context, Variable::RequestHeaders(Some("X-TEST".into()))),
+            extract(
+                &context,
+                Variable::RequestHeaders(Some(Selector::Literal("X-TEST".into())))
+            ),
             vec!["one", "two"]
         );
         let all = extract(&context, Variable::RequestHeaders(None));
@@ -706,7 +765,10 @@ mod tests {
         let headers = header_map(&[("cookie", "session=abc; theme=dark")]);
         let context = context(&headers);
         assert_eq!(
-            extract(&context, Variable::RequestCookies(Some("session".into()))),
+            extract(
+                &context,
+                Variable::RequestCookies(Some(Selector::Literal("session".into())))
+            ),
             vec!["abc"]
         );
         assert_eq!(
@@ -735,7 +797,10 @@ mod tests {
         assert_eq!(extract(&context, Variable::RemoteAddr), vec!["203.0.113.7"]);
         context.tx_mut().set("score", "9".to_string());
         assert_eq!(
-            extract(&context, Variable::Tx(Some("SCORE".into()))),
+            extract(
+                &context,
+                Variable::Tx(Some(Selector::Literal("SCORE".into())))
+            ),
             vec!["9"]
         );
         assert_eq!(extract(&context, Variable::Tx(None)), vec!["9"]);
@@ -791,15 +856,24 @@ mod tests {
         let mut context = context(&headers);
         context.set_body(b"q=body&x=1");
         assert_eq!(
-            extract(&context, Variable::ArgsGet(Some("q".into()))),
+            extract(
+                &context,
+                Variable::ArgsGet(Some(Selector::Literal("q".into())))
+            ),
             vec!["<script>"]
         );
         assert_eq!(
-            extract(&context, Variable::ArgsPost(Some("x".into()))),
+            extract(
+                &context,
+                Variable::ArgsPost(Some(Selector::Literal("x".into())))
+            ),
             vec!["1"]
         );
         assert_eq!(
-            extract(&context, Variable::Args(Some("x".into()))),
+            extract(
+                &context,
+                Variable::Args(Some(Selector::Literal("x".into())))
+            ),
             vec!["1"]
         );
     }
@@ -809,7 +883,10 @@ mod tests {
         let headers = header_map(&[("content-type", "application/xml")]);
         let mut context = context(&headers);
         context.set_body(b"<root><a>attack</a><b x=\"y\"/></root>");
-        let values = extract(&context, Variable::Xml(Some("/*".into())));
+        let values = extract(
+            &context,
+            Variable::Xml(Some(Selector::Literal("/*".into()))),
+        );
         assert!(values.contains(&"attack".to_string()));
         assert!(values.contains(&"y".to_string()));
     }
@@ -825,7 +902,10 @@ mod tests {
             vec!["text/html"]
         );
         assert_eq!(
-            extract(&context, Variable::ResponseHeaders(Some("X-Test".into()))),
+            extract(
+                &context,
+                Variable::ResponseHeaders(Some(Selector::Literal("X-Test".into())))
+            ),
             vec!["one"]
         );
         let mut response_header_names = extract(&context, Variable::ResponseHeadersNames);

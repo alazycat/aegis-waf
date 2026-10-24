@@ -5,6 +5,32 @@ use std::sync::Arc;
 pub use crate::operators::CompiledOperator;
 pub use crate::transforms::Transform;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Selector {
+    Literal(String),
+}
+
+impl Selector {
+    pub fn matches(&self, key: &str) -> bool {
+        match self {
+            Self::Literal(value) => value.eq_ignore_ascii_case(key),
+        }
+    }
+
+    pub fn as_display(&self) -> String {
+        match self {
+            Self::Literal(value) => value.clone(),
+        }
+    }
+}
+
+fn selected(prefix: &str, selector: &Option<Selector>) -> String {
+    match selector {
+        Some(selector) => format!("{prefix}:{}", selector.as_display()),
+        None => prefix.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PrefilterScope {
     pub request_line: bool,
@@ -83,13 +109,13 @@ pub enum Variable {
     RequestMethod,
     QueryString,
     RequestFilename,
-    RequestHeaders(Option<String>),
+    RequestHeaders(Option<Selector>),
     RequestHeadersNames,
-    Args(Option<String>),
-    ArgsGet(Option<String>),
-    ArgsPost(Option<String>),
+    Args(Option<Selector>),
+    ArgsGet(Option<Selector>),
+    ArgsPost(Option<Selector>),
     ArgsNames,
-    RequestCookies(Option<String>),
+    RequestCookies(Option<Selector>),
     RequestCookiesNames,
     RequestBody,
     RequestBodyLength,
@@ -98,22 +124,22 @@ pub enum Variable {
     FilesSizes,
     FilesCombinedSize,
     FilesTmpnames,
-    Ip(Option<String>),
-    Session(Option<String>),
-    User(Option<String>),
-    Global(Option<String>),
+    Ip(Option<Selector>),
+    Session(Option<Selector>),
+    User(Option<Selector>),
+    Global(Option<Selector>),
     RemoteAddr,
     MatchedVar,
     MatchedVarName,
-    MatchedVars,
-    Xml(Option<String>),
+    MatchedVars(Option<Selector>),
+    Xml(Option<Selector>),
     ResponseStatus,
-    ResponseHeaders(Option<String>),
+    ResponseHeaders(Option<Selector>),
     ResponseHeadersNames,
     ResponseBody,
     ResponseBodyLength,
     ResponseContentType,
-    Tx(Option<String>),
+    Tx(Option<Selector>),
 }
 
 impl Variable {
@@ -127,18 +153,13 @@ impl Variable {
             Self::RequestMethod => "REQUEST_METHOD".to_string(),
             Self::QueryString => "QUERY_STRING".to_string(),
             Self::RequestFilename => "REQUEST_FILENAME".to_string(),
-            Self::RequestHeaders(None) => "REQUEST_HEADERS".to_string(),
-            Self::RequestHeaders(Some(name)) => format!("REQUEST_HEADERS:{name}"),
+            Self::RequestHeaders(selector) => selected("REQUEST_HEADERS", selector),
             Self::RequestHeadersNames => "REQUEST_HEADERS_NAMES".to_string(),
-            Self::Args(None) => "ARGS".to_string(),
-            Self::Args(Some(name)) => format!("ARGS:{name}"),
-            Self::ArgsGet(None) => "ARGS_GET".to_string(),
-            Self::ArgsGet(Some(name)) => format!("ARGS_GET:{name}"),
-            Self::ArgsPost(None) => "ARGS_POST".to_string(),
-            Self::ArgsPost(Some(name)) => format!("ARGS_POST:{name}"),
+            Self::Args(selector) => selected("ARGS", selector),
+            Self::ArgsGet(selector) => selected("ARGS_GET", selector),
+            Self::ArgsPost(selector) => selected("ARGS_POST", selector),
             Self::ArgsNames => "ARGS_NAMES".to_string(),
-            Self::RequestCookies(None) => "REQUEST_COOKIES".to_string(),
-            Self::RequestCookies(Some(name)) => format!("REQUEST_COOKIES:{name}"),
+            Self::RequestCookies(selector) => selected("REQUEST_COOKIES", selector),
             Self::RequestCookiesNames => "REQUEST_COOKIES_NAMES".to_string(),
             Self::RequestBody => "REQUEST_BODY".to_string(),
             Self::RequestBodyLength => "REQUEST_BODY_LENGTH".to_string(),
@@ -147,30 +168,46 @@ impl Variable {
             Self::FilesSizes => "FILES_SIZES".to_string(),
             Self::FilesCombinedSize => "FILES_COMBINED_SIZE".to_string(),
             Self::FilesTmpnames => "FILES_TMPNAMES".to_string(),
-            Self::Ip(None) => "IP".to_string(),
-            Self::Ip(Some(name)) => format!("IP:{name}"),
-            Self::Session(None) => "SESSION".to_string(),
-            Self::Session(Some(name)) => format!("SESSION:{name}"),
-            Self::User(None) => "USER".to_string(),
-            Self::User(Some(name)) => format!("USER:{name}"),
-            Self::Global(None) => "GLOBAL".to_string(),
-            Self::Global(Some(name)) => format!("GLOBAL:{name}"),
+            Self::Ip(selector) => selected("IP", selector),
+            Self::Session(selector) => selected("SESSION", selector),
+            Self::User(selector) => selected("USER", selector),
+            Self::Global(selector) => selected("GLOBAL", selector),
             Self::RemoteAddr => "REMOTE_ADDR".to_string(),
             Self::MatchedVar => "MATCHED_VAR".to_string(),
             Self::MatchedVarName => "MATCHED_VAR_NAME".to_string(),
-            Self::MatchedVars => "MATCHED_VARS".to_string(),
-            Self::Xml(None) => "XML".to_string(),
-            Self::Xml(Some(selector)) => format!("XML:{selector}"),
+            Self::MatchedVars(selector) => selected("MATCHED_VARS", selector),
+            Self::Xml(selector) => selected("XML", selector),
             Self::ResponseStatus => "RESPONSE_STATUS".to_string(),
-            Self::ResponseHeaders(None) => "RESPONSE_HEADERS".to_string(),
-            Self::ResponseHeaders(Some(name)) => format!("RESPONSE_HEADERS:{name}"),
+            Self::ResponseHeaders(selector) => selected("RESPONSE_HEADERS", selector),
             Self::ResponseHeadersNames => "RESPONSE_HEADERS_NAMES".to_string(),
             Self::ResponseBody => "RESPONSE_BODY".to_string(),
             Self::ResponseBodyLength => "RESPONSE_BODY_LENGTH".to_string(),
             Self::ResponseContentType => "RESPONSE_CONTENT_TYPE".to_string(),
-            Self::Tx(None) => "TX".to_string(),
-            Self::Tx(Some(name)) => format!("TX:{name}"),
+            Self::Tx(selector) => selected("TX", selector),
         }
+    }
+
+    pub fn selector(&self) -> Option<&Selector> {
+        match self {
+            Self::RequestHeaders(selector)
+            | Self::Args(selector)
+            | Self::ArgsGet(selector)
+            | Self::ArgsPost(selector)
+            | Self::RequestCookies(selector)
+            | Self::Ip(selector)
+            | Self::Session(selector)
+            | Self::User(selector)
+            | Self::Global(selector)
+            | Self::MatchedVars(selector)
+            | Self::Xml(selector)
+            | Self::ResponseHeaders(selector)
+            | Self::Tx(selector) => selector.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn same_family(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
     }
 }
 

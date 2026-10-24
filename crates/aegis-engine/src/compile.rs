@@ -588,7 +588,7 @@ fn variable_prefilter_scope(variable: &Variable) -> Option<PrefilterScope> {
         | Variable::RemoteAddr
         | Variable::MatchedVar
         | Variable::MatchedVarName
-        | Variable::MatchedVars
+        | Variable::MatchedVars(_)
         | Variable::Xml(_)
         | Variable::ResponseStatus
         | Variable::ResponseHeaders(_)
@@ -844,6 +844,12 @@ fn build_prefilter(
     Ok(Some(Prefilter { variants }))
 }
 
+fn lower_selector(selector: Selector) -> Selector {
+    match selector {
+        Selector::Literal(value) => Selector::Literal(value.to_ascii_lowercase()),
+    }
+}
+
 fn parse_variables(
     file: &Path,
     line: usize,
@@ -883,7 +889,7 @@ fn parse_variables(
             ));
         }
         let (name, selector) = match item.split_once(':') {
-            Some((name, selector)) => (name, Some(selector.to_string())),
+            Some((name, selector)) => (name, Some(Selector::Literal(selector.to_string()))),
             None => (item, None),
         };
         let variable = match name.to_ascii_uppercase().as_str() {
@@ -906,10 +912,10 @@ fn parse_variables(
             "FILES_SIZES" if selector.is_none() => Variable::FilesSizes,
             "FILES_COMBINED_SIZE" if selector.is_none() => Variable::FilesCombinedSize,
             "FILES_TMPNAMES" if selector.is_none() => Variable::FilesTmpnames,
-            "IP" => Variable::Ip(selector.map(|value| value.to_ascii_lowercase())),
-            "SESSION" => Variable::Session(selector.map(|value| value.to_ascii_lowercase())),
-            "USER" => Variable::User(selector.map(|value| value.to_ascii_lowercase())),
-            "GLOBAL" => Variable::Global(selector.map(|value| value.to_ascii_lowercase())),
+            "IP" => Variable::Ip(selector.map(lower_selector)),
+            "SESSION" => Variable::Session(selector.map(lower_selector)),
+            "USER" => Variable::User(selector.map(lower_selector)),
+            "GLOBAL" => Variable::Global(selector.map(lower_selector)),
             "REMOTE_ADDR" if selector.is_none() => Variable::RemoteAddr,
             "REQUEST_URI_RAW" if selector.is_none() => Variable::RequestUriRaw,
             "REQUEST_LINE" if selector.is_none() => Variable::RequestLine,
@@ -917,7 +923,7 @@ fn parse_variables(
             "REQUEST_BASENAME" if selector.is_none() => Variable::RequestBasename,
             "MATCHED_VAR" if selector.is_none() => Variable::MatchedVar,
             "MATCHED_VAR_NAME" if selector.is_none() => Variable::MatchedVarName,
-            "MATCHED_VARS" if selector.is_none() => Variable::MatchedVars,
+            "MATCHED_VARS" => Variable::MatchedVars(selector),
             "XML" => Variable::Xml(selector),
             "RESPONSE_STATUS" if selector.is_none() => Variable::ResponseStatus,
             "RESPONSE_HEADERS" => Variable::ResponseHeaders(selector),
@@ -925,7 +931,7 @@ fn parse_variables(
             "RESPONSE_BODY" if selector.is_none() => Variable::ResponseBody,
             "RESPONSE_BODY_LENGTH" if selector.is_none() => Variable::ResponseBodyLength,
             "RESPONSE_CONTENT_TYPE" if selector.is_none() => Variable::ResponseContentType,
-            "TX" => Variable::Tx(selector.map(|value| value.to_ascii_lowercase())),
+            "TX" => Variable::Tx(selector.map(lower_selector)),
             _ => {
                 if options.lenient {
                     tracing::warn!(
