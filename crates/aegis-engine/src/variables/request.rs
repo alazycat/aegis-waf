@@ -562,14 +562,17 @@ impl RequestContext {
             Variable::Files => self
                 .multipart_parts
                 .iter()
-                .filter(|part| part.filename.is_some())
-                .map(|part| VariableEntry::item("FILES", &part.name, part.name.clone()))
+                .filter_map(|part| {
+                    part.filename
+                        .as_ref()
+                        .map(|filename| VariableEntry::item("FILES", &part.name, filename.clone()))
+                })
                 .collect(),
             Variable::FilesNames => self
                 .multipart_parts
                 .iter()
-                .filter_map(|part| part.filename.as_ref())
-                .map(|filename| VariableEntry::item("FILES_NAMES", filename, filename.clone()))
+                .filter(|part| part.filename.is_some())
+                .map(|part| VariableEntry::item("FILES_NAMES", &part.name, part.name.clone()))
                 .collect(),
             Variable::FilesSizes => self
                 .multipart_parts
@@ -1365,8 +1368,8 @@ mod tests {
         let mut context = context(&headers);
         let body = b"--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nfile-content\r\n--X\r\nContent-Disposition: form-data; name=\"field\"\r\n\r\nvalue\r\n--X--\r\n";
         context.set_body(body).unwrap();
-        assert_eq!(extract(&context, Variable::Files), vec!["file"]);
-        assert_eq!(extract(&context, Variable::FilesNames), vec!["a.txt"]);
+        assert_eq!(extract(&context, Variable::Files), vec!["a.txt"]);
+        assert_eq!(extract(&context, Variable::FilesNames), vec!["file"]);
         assert_eq!(extract(&context, Variable::FilesSizes), vec!["12"]);
         assert_eq!(extract(&context, Variable::FilesCombinedSize), vec!["12"]);
         assert!(extract(&context, Variable::FilesTmpnames).is_empty());
@@ -1388,7 +1391,7 @@ mod tests {
         ))));
         assert_eq!(charset.len(), 2);
         assert_eq!(extract(&context, Variable::ArgsPost(None)), vec!["UTF-8"]);
-        assert_eq!(extract(&context, Variable::Files), vec!["file"]);
+        assert_eq!(extract(&context, Variable::Files), vec!["a.txt"]);
     }
 
     #[test]
@@ -1431,8 +1434,8 @@ mod tests {
         let mut context = context(&headers);
         let body = b"--X\r\nContent-Disposition: form-data; name=\"fi;le\"; filename=\"te;st.txt\"\r\nContent-Type: text/plain\r\n\r\nvalue\r\n--X--\r\n";
         context.set_body(body).unwrap();
-        assert_eq!(extract(&context, Variable::Files), vec!["fi;le"]);
-        assert_eq!(extract(&context, Variable::FilesNames), vec!["te;st.txt"]);
+        assert_eq!(extract(&context, Variable::Files), vec!["te;st.txt"]);
+        assert_eq!(extract(&context, Variable::FilesNames), vec!["fi;le"]);
     }
 
     #[test]
