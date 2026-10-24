@@ -156,7 +156,7 @@ impl RequestContext {
         Self {
             method: view.method.to_string(),
             uri: view.uri.to_string(),
-            path: view.path.to_string(),
+            path: decode_path(view.path),
             query: view.query.map(str::to_string),
             protocol: view.protocol.to_string(),
             headers,
@@ -693,6 +693,38 @@ fn derive_body_processor(headers: &[(String, String)]) -> BodyProcessor {
     }
 }
 
+fn decode_path(path: &str) -> String {
+    if !path.contains('%') {
+        return path.to_string();
+    }
+    let bytes = path.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+            {
+                output.push(high * 16 + low);
+                index += 3;
+                continue;
+            }
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn multipart_boundary(headers: &[(String, String)]) -> Option<String> {
     let content_type = headers
         .iter()
@@ -1201,6 +1233,31 @@ mod tests {
         context.set_body(b"q=body").unwrap();
         let after = context.extract(&Variable::ArgsGet(None));
         assert!(!Arc::ptr_eq(&first, &after));
+    }
+
+    #[test]
+    fn request_filename_is_url_decoded() {
+        let headers = header_map(&[]);
+        let view = RequestView {
+            method: "GET",
+            uri: "/path/with/if%20exist%20StorageServer.port%20echo%20yay",
+            path: "/path/with/if%20exist%20StorageServer.port%20echo%20yay",
+            query: None,
+            protocol: "HTTP/1.1",
+            headers: &headers,
+            body: b"",
+            remote_addr: "203.0.113.7".parse().unwrap(),
+            unique_id: "test-unique-id",
+        };
+        let context = RequestContext::new(&view);
+        assert_eq!(
+            extract(&context, Variable::RequestFilename),
+            vec!["/path/with/if exist StorageServer.port echo yay"]
+        );
+        assert_eq!(
+            extract(&context, Variable::RequestBasename),
+            vec!["if exist StorageServer.port echo yay"]
+        );
     }
 
     #[test]
