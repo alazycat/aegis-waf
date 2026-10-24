@@ -641,6 +641,7 @@ mod tests {
             headers: &headers,
             body,
             remote_addr: "127.0.0.1".parse().unwrap(),
+            unique_id: "test-unique-id",
         };
         evaluate(rules, &view)
     }
@@ -1070,6 +1071,7 @@ SecRule MATCHED_VAR "@contains secret-42" "id:9204,phase:1,deny,status:403,msg:'
             headers: &headers,
             body: b"<root><a>attack</a></root>",
             remote_addr: "127.0.0.1".parse().unwrap(),
+            unique_id: "test-unique-id",
         };
         let evaluation = evaluate(&rules, &view);
         assert!(matches!(
@@ -1139,6 +1141,7 @@ SecRule ARGS "@contains attack" "id:3,phase:1,deny,status:403"
             headers: &request_headers,
             body: b"",
             remote_addr: "127.0.0.1".parse().unwrap(),
+            unique_id: "test-unique-id",
         };
         let mut state = EvaluationState::new(&view);
         state.evaluate_phase(&rules, Phase::Phase1);
@@ -1171,6 +1174,7 @@ SecRule ARGS "@contains attack" "id:3,phase:1,deny,status:403"
             headers: &request_headers,
             body: b"",
             remote_addr: "127.0.0.1".parse().unwrap(),
+            unique_id: "test-unique-id",
         };
         let mut state = EvaluationState::new(&view);
         let response_headers = headers(&[("content-type", "text/plain")]);
@@ -1236,6 +1240,7 @@ SecRule TX:SEEN "@eq 1" "id:9402,phase:5,deny,status:403"
             headers: &request_headers,
             body: b"",
             remote_addr: "127.0.0.1".parse().unwrap(),
+            unique_id: "test-unique-id",
         };
         let mut state = EvaluationState::new(&view);
         let response_headers = headers(&[("content-type", "text/plain")]);
@@ -1346,6 +1351,7 @@ SecRule IP:HITS "@ge 2" "id:9602,phase:1,deny,status:403"
             headers: &request_headers,
             body: b"",
             remote_addr: "127.0.0.1".parse().unwrap(),
+            unique_id: "test-unique-id",
         };
         let store = std::sync::Arc::new(crate::collections::MemoryCollectionStore::new());
         let mut first = EvaluationState::new_with_store(&view, store.clone());

@@ -594,6 +594,7 @@ fn variable_prefilter_scope(variable: &Variable) -> Option<PrefilterScope> {
         | Variable::Global(_)
         | Variable::RequestBodyLength
         | Variable::RemoteAddr
+        | Variable::UniqueId
         | Variable::MatchedVar
         | Variable::MatchedVarName
         | Variable::MatchedVars(_)
@@ -947,6 +948,7 @@ fn parse_variables(
             "USER" => Variable::User(selector.map(lower_selector)),
             "GLOBAL" => Variable::Global(selector.map(lower_selector)),
             "REMOTE_ADDR" if selector.is_none() => Variable::RemoteAddr,
+            "UNIQUE_ID" if selector.is_none() => Variable::UniqueId,
             "REQUEST_URI_RAW" if selector.is_none() => Variable::RequestUriRaw,
             "REQUEST_LINE" if selector.is_none() => Variable::RequestLine,
             "REQUEST_PROTOCOL" if selector.is_none() => Variable::RequestProtocol,

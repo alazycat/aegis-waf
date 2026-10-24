@@ -471,6 +471,7 @@ async fn handle(
             headers: &parts.headers,
             body: &[],
             remote_addr: peer.ip(),
+            unique_id: request_id.as_str(),
         };
         EvaluationState::new_with_store(&view, state.collections.clone())
     };

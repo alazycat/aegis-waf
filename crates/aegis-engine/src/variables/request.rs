@@ -20,6 +20,7 @@ pub struct RequestView<'a> {
     pub headers: &'a HeaderMap,
     pub body: &'a [u8],
     pub remote_addr: IpAddr,
+    pub unique_id: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +68,7 @@ pub struct RequestContext {
     body_pairs: Vec<(String, String)>,
     cookies: Vec<(String, String)>,
     remote_addr: IpAddr,
+    unique_id: String,
     body_text: String,
     body_len: usize,
     body_processor: BodyProcessor,
@@ -126,6 +128,7 @@ impl RequestContext {
             body_pairs: Vec::new(),
             cookies,
             remote_addr: view.remote_addr,
+            unique_id: view.unique_id.to_string(),
             body_text: String::new(),
             body_len: 0,
             body_processor: BodyProcessor::None,
@@ -447,6 +450,7 @@ impl RequestContext {
                     self.remote_addr.to_string(),
                 )]
             }
+            Variable::UniqueId => vec![VariableEntry::scalar(variable, self.unique_id.clone())],
             Variable::MatchedVar => self
                 .tx
                 .get("matched_var")
@@ -763,6 +767,7 @@ mod tests {
             headers,
             body: b"",
             remote_addr: "203.0.113.7".parse().unwrap(),
+            unique_id: "test-unique-id",
         };
         RequestContext::new(&view)
     }
@@ -773,6 +778,16 @@ mod tests {
             .iter()
             .map(|entry| entry.value.clone())
             .collect()
+    }
+
+    #[test]
+    fn extracts_unique_id() {
+        let headers = header_map(&[]);
+        let context = context(&headers);
+        assert_eq!(
+            extract(&context, Variable::UniqueId),
+            vec!["test-unique-id"]
+        );
     }
 
     #[test]

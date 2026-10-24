@@ -94,6 +94,7 @@ fn bench_evaluate(c: &mut Criterion) {
         ("content-type", "application/x-www-form-urlencoded"),
     ]);
     let remote_addr = "127.0.0.1".parse().unwrap();
+    let unique_id = "bench-unique-id";
 
     let safe = RequestView {
         method: "GET",
@@ -104,6 +105,7 @@ fn bench_evaluate(c: &mut Criterion) {
         body: b"",
         protocol: "HTTP/1.1",
         remote_addr,
+        unique_id,
     };
     let blocked_xss = RequestView {
         method: "GET",
@@ -114,6 +116,7 @@ fn bench_evaluate(c: &mut Criterion) {
         body: b"",
         protocol: "HTTP/1.1",
         remote_addr,
+        unique_id,
     };
     let blocked_body = RequestView {
         method: "POST",
@@ -124,6 +127,7 @@ fn bench_evaluate(c: &mut Criterion) {
         body: b"q=union+select",
         protocol: "HTTP/1.1",
         remote_addr,
+        unique_id,
     };
     let match200_uri = "/search?q=needle-0199";
     let match200_query = "q=needle-0199";
@@ -136,6 +140,7 @@ fn bench_evaluate(c: &mut Criterion) {
         body: b"",
         protocol: "HTTP/1.1",
         remote_addr,
+        unique_id,
     };
     let match500_uri = "/search?q=needle-0499";
     let match500_query = "q=needle-0499";
@@ -148,6 +153,7 @@ fn bench_evaluate(c: &mut Criterion) {
         body: b"",
         protocol: "HTTP/1.1",
         remote_addr,
+        unique_id,
     };
     let match_regex200_uri = "/search?q=rxneedle-0199";
     let match_regex200_query = "q=rxneedle-0199";
@@ -160,6 +166,7 @@ fn bench_evaluate(c: &mut Criterion) {
         body: b"",
         protocol: "HTTP/1.1",
         remote_addr,
+        unique_id,
     };
     let match_regex500_uri = "/search?q=rxneedle-0499";
     let match_regex500_query = "q=rxneedle-0499";
@@ -172,6 +179,7 @@ fn bench_evaluate(c: &mut Criterion) {
         body: b"",
         protocol: "HTTP/1.1",
         remote_addr,
+        unique_id,
     };
     let match_icase200_uri = "/search?q=ICASE-0199";
     let match_icase200_query = "q=ICASE-0199";
@@ -184,6 +192,7 @@ fn bench_evaluate(c: &mut Criterion) {
         body: b"",
         protocol: "HTTP/1.1",
         remote_addr,
+        unique_id,
     };
     let match_icase500_uri = "/search?q=ICASE-0499";
     let match_icase500_query = "q=ICASE-0499";
@@ -196,6 +205,7 @@ fn bench_evaluate(c: &mut Criterion) {
         body: b"",
         protocol: "HTTP/1.1",
         remote_addr,
+        unique_id,
     };
 
     let mut group = c.benchmark_group("evaluate");

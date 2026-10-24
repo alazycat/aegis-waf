@@ -34,6 +34,7 @@ fn request<'a>(
         headers,
         body,
         remote_addr: "198.51.100.9".parse().unwrap(),
+        unique_id: "test-unique-id",
     }
 }
 
