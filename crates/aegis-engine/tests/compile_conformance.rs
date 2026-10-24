@@ -2,7 +2,7 @@ use std::fs;
 
 use aegis_engine::compile::{load_rules, LoadOptions};
 use aegis_engine::model::{
-    CompiledOperator, CtlAction, Phase, RuleGroup, RuleIdRange, Selector, Variable,
+    CompiledOperator, CtlAction, Phase, RuleGroup, RuleIdRange, Selector, SetVarOp, Variable,
 };
 use tempfile::tempdir;
 
@@ -383,6 +383,28 @@ fn rejects_reversed_rule_remove_by_id_range() {
     let error = load(r#"SecRule ARGS "@contains x" "id:1,phase:1,pass,ctl:ruleRemoveById=9-1""#)
         .unwrap_err();
     assert!(error.to_string().contains("invalid ruleRemoveById range"));
+}
+
+#[test]
+fn compiles_quoted_setvar_and_initcol() {
+    let rules = load(
+        r#"
+SecAction "id:1,phase:1,pass,nolog,setvar:'tx.score=4',initcol:'ip=%{REMOTE_ADDR}'"
+"#,
+    )
+    .unwrap();
+    let RuleGroup::Single(rule) = &rules.phase1[0] else {
+        panic!("expected single rule");
+    };
+    assert_eq!(rule.actions.setvars.len(), 1);
+    assert_eq!(rule.actions.setvars[0].name, "score");
+    assert!(matches!(
+        &rule.actions.setvars[0].op,
+        SetVarOp::Assign(value) if value == "4"
+    ));
+    assert_eq!(rule.actions.init_collections.len(), 1);
+    assert_eq!(rule.actions.init_collections[0].0, "ip");
+    assert_eq!(rule.actions.init_collections[0].1, "%{REMOTE_ADDR}");
 }
 
 #[test]

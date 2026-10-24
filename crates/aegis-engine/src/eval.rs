@@ -1555,3 +1555,50 @@ SecRule IP:HITS "@ge 2" "id:9602,phase:1,deny,status:403"
         assert!(evaluation.matched[0].log);
     }
 }
+
+#[cfg(test)]
+mod quoted_setvar_tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use crate::compile::{load_rules, LoadOptions};
+    use crate::evaluate;
+    use crate::variables::request::RequestView;
+
+    #[test]
+    fn quoted_setvar_value_is_visible_to_later_macros() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rules.conf");
+        fs::write(
+            &path,
+            r#"
+SecRule &TX:foo "@eq 0" "id:1,phase:1,pass,nolog,setvar:'tx.foo=4'"
+SecAction "id:2,phase:2,pass,log,msg:'foo=%{tx.foo}'"
+"#,
+        )
+        .unwrap();
+        let rules = load_rules(
+            &[path],
+            &LoadOptions {
+                lenient: false,
+                version: 1,
+            },
+        )
+        .unwrap();
+        let headers = http::HeaderMap::new();
+        let view = RequestView {
+            method: "GET",
+            uri: "/",
+            path: "/",
+            query: None,
+            protocol: "HTTP/1.1",
+            headers: &headers,
+            body: b"",
+            remote_addr: "127.0.0.1".parse().unwrap(),
+            unique_id: "test",
+        };
+        let evaluation = evaluate(&rules, &view);
+        assert_eq!(evaluation.matched[1].msg.as_deref(), Some("foo=4"));
+    }
+}

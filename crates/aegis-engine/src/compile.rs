@@ -1574,6 +1574,7 @@ fn parse_target_variable(
 }
 
 fn parse_initcol(raw: &str) -> Result<(String, String), String> {
+    let raw = unquote(raw);
     let (collection, template) = raw
         .split_once('=')
         .ok_or_else(|| "initcol requires collection=value".to_string())?;
@@ -1607,6 +1608,7 @@ fn parse_setvar_target(target: &str) -> Result<(SetVarScope, String), String> {
 }
 
 fn parse_setvar(raw: &str) -> Result<SetVar, String> {
+    let raw = unquote(raw);
     if let Some(target) = raw.strip_prefix('!') {
         let (scope, name) = parse_setvar_target(target)?;
         return Ok(SetVar {
