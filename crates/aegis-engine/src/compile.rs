@@ -585,6 +585,8 @@ fn variable_prefilter_scope(variable: &Variable) -> Option<PrefilterScope> {
         | Variable::FilesSizes
         | Variable::FilesCombinedSize
         | Variable::FilesTmpnames
+        | Variable::MultipartPartHeaders(_)
+        | Variable::ReqbodyProcessor
         | Variable::Count(_)
         | Variable::Ip(_)
         | Variable::Session(_)
@@ -933,6 +935,8 @@ fn parse_variables(
             "REQUEST_COOKIES_NAMES" if selector.is_none() => Variable::RequestCookiesNames,
             "REQUEST_BODY" if selector.is_none() => Variable::RequestBody,
             "REQUEST_BODY_LENGTH" if selector.is_none() => Variable::RequestBodyLength,
+            "MULTIPART_PART_HEADERS" => Variable::MultipartPartHeaders(selector),
+            "REQBODY_PROCESSOR" if selector.is_none() => Variable::ReqbodyProcessor,
             "FILES" if selector.is_none() => Variable::Files,
             "FILES_NAMES" if selector.is_none() => Variable::FilesNames,
             "FILES_SIZES" if selector.is_none() => Variable::FilesSizes,

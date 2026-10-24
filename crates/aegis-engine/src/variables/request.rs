@@ -6,7 +6,7 @@ use std::sync::Arc;
 use http::HeaderMap;
 
 use crate::collections::{MemoryCollectionStore, SharedCollectionStore};
-use crate::model::{PrefilterScope, Selector, Variable};
+use crate::model::{BodyProcessor, PrefilterScope, Selector, Variable};
 
 use super::tx::TxStore;
 
@@ -51,6 +51,7 @@ impl VariableEntry {
 struct MultipartPart {
     name: String,
     filename: Option<String>,
+    headers: Vec<String>,
     data: Vec<u8>,
 }
 
@@ -68,6 +69,8 @@ pub struct RequestContext {
     remote_addr: IpAddr,
     body_text: String,
     body_len: usize,
+    body_processor: BodyProcessor,
+    body_processor_override: Option<BodyProcessor>,
     xml_values: Vec<String>,
     multipart_parts: Vec<MultipartPart>,
     response_status: Option<u16>,
@@ -125,6 +128,8 @@ impl RequestContext {
             remote_addr: view.remote_addr,
             body_text: String::new(),
             body_len: 0,
+            body_processor: BodyProcessor::None,
+            body_processor_override: None,
             xml_values: Vec::new(),
             multipart_parts: Vec::new(),
             response_status: None,
@@ -195,38 +200,49 @@ impl RequestContext {
     pub fn set_body(&mut self, body: &[u8]) {
         self.body_len = body.len();
         self.body_text = String::from_utf8_lossy(body).into_owned();
-        let is_form = self
-            .headers
-            .iter()
-            .find(|(name, _)| name == "content-type")
-            .map(|(_, value)| {
-                value
-                    .to_ascii_lowercase()
-                    .starts_with("application/x-www-form-urlencoded")
-            })
-            .unwrap_or(false);
-        self.body_pairs = if is_form {
-            form_urlencoded::parse(body)
-                .map(|(name, value)| (name.into_owned(), value.into_owned()))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        self.xml_values = if self
-            .headers
-            .iter()
-            .find(|(name, _)| name == "content-type")
-            .map(|(_, value)| value.to_ascii_lowercase().contains("xml"))
-            .unwrap_or(false)
-        {
-            extract_xml_values(&self.body_text)
-        } else {
-            Vec::new()
-        };
-        self.multipart_parts = multipart_boundary(&self.headers)
-            .map(|boundary| parse_multipart(body, &boundary))
-            .unwrap_or_default();
+        self.body_processor = self
+            .body_processor_override
+            .unwrap_or_else(|| derive_body_processor(&self.headers));
+        self.body_pairs = Vec::new();
+        self.multipart_parts = Vec::new();
+        self.xml_values = Vec::new();
+
+        match self.body_processor {
+            BodyProcessor::UrlEncoded => {
+                self.body_pairs = form_urlencoded::parse(body)
+                    .map(|(name, value)| (name.into_owned(), value.into_owned()))
+                    .collect();
+            }
+            BodyProcessor::Multipart => {
+                if let Some(boundary) = multipart_boundary(&self.headers) {
+                    self.multipart_parts = parse_multipart(body, &boundary);
+                    self.body_pairs = self
+                        .multipart_parts
+                        .iter()
+                        .filter(|part| part.filename.is_none())
+                        .map(|part| {
+                            (
+                                part.name.clone(),
+                                String::from_utf8_lossy(&part.data).into_owned(),
+                            )
+                        })
+                        .collect();
+                }
+            }
+            BodyProcessor::Xml => {
+                self.xml_values = extract_xml_values(&self.body_text);
+            }
+            BodyProcessor::Json | BodyProcessor::None => {}
+        }
         self.cache.borrow_mut().clear();
+    }
+
+    pub fn set_body_processor_override(&mut self, processor: BodyProcessor) {
+        self.body_processor_override = Some(processor);
+    }
+
+    pub fn body_processor(&self) -> BodyProcessor {
+        self.body_processor
     }
 
     pub fn set_response_headers(&mut self, status: u16, headers: &HeaderMap) {
@@ -366,6 +382,24 @@ impl RequestContext {
             Variable::RequestBody => vec![VariableEntry::scalar(variable, self.body_text.clone())],
             Variable::RequestBodyLength => {
                 vec![VariableEntry::scalar(variable, self.body_len.to_string())]
+            }
+            Variable::MultipartPartHeaders(selector) => self
+                .multipart_parts
+                .iter()
+                .filter(|part| name_matches(selector, &part.name))
+                .flat_map(|part| {
+                    part.headers.iter().map(move |header| {
+                        VariableEntry::item("MULTIPART_PART_HEADERS", &part.name, header.clone())
+                    })
+                })
+                .collect(),
+            Variable::ReqbodyProcessor => {
+                let name = self.body_processor.name();
+                if name.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![VariableEntry::scalar(variable, name.to_string())]
+                }
             }
             Variable::Files => self
                 .multipart_parts
@@ -562,6 +596,30 @@ fn unique_names(pairs: &[(String, String)]) -> Vec<String> {
         .collect()
 }
 
+fn derive_body_processor(headers: &[(String, String)]) -> BodyProcessor {
+    let Some(content_type) = headers
+        .iter()
+        .find(|(name, _)| name == "content-type")
+        .map(|(_, value)| value.to_ascii_lowercase())
+    else {
+        return BodyProcessor::UrlEncoded;
+    };
+    if content_type.starts_with("application/x-www-form-urlencoded") {
+        BodyProcessor::UrlEncoded
+    } else if content_type.starts_with("multipart/form-data") {
+        BodyProcessor::Multipart
+    } else if content_type.starts_with("application/json") || content_type.contains("+json") {
+        BodyProcessor::Json
+    } else if content_type.starts_with("application/xml")
+        || content_type.starts_with("text/xml")
+        || content_type.contains("+xml")
+    {
+        BodyProcessor::Xml
+    } else {
+        BodyProcessor::None
+    }
+}
+
 fn multipart_boundary(headers: &[(String, String)]) -> Option<String> {
     let content_type = headers
         .iter()
@@ -613,6 +671,12 @@ fn parse_multipart(body: &[u8], boundary: &str) -> Vec<MultipartPart> {
             parts.push(MultipartPart {
                 name,
                 filename,
+                headers: headers_text
+                    .lines()
+                    .map(str::trim_end)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .collect(),
                 data: body[data_start..data_end].to_vec(),
             });
         }
@@ -957,6 +1021,44 @@ mod tests {
         assert_eq!(extract(&context, Variable::FilesSizes), vec!["12"]);
         assert_eq!(extract(&context, Variable::FilesCombinedSize), vec!["12"]);
         assert!(extract(&context, Variable::FilesTmpnames).is_empty());
+    }
+
+    #[test]
+    fn extracts_multipart_part_headers_and_form_fields() {
+        let headers = header_map(&[("content-type", "multipart/form-data; boundary=X")]);
+        let mut context = context(&headers);
+        let body = b"--X\r\nContent-Disposition: form-data; name=\"_charset_\"\r\nContent-Type: text/plain\r\n\r\nUTF-8\r\n--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\nfile-content\r\n--X--\r\n";
+        context.set_body(body);
+        let part_headers = context.extract(&Variable::MultipartPartHeaders(None));
+        assert!(part_headers
+            .iter()
+            .any(|entry| entry.value.eq_ignore_ascii_case("content-type: text/plain")));
+        assert_eq!(part_headers[0].key.as_deref(), Some("_charset_"));
+        let charset = context.extract(&Variable::MultipartPartHeaders(Some(Selector::Literal(
+            "_charset_".to_string(),
+        ))));
+        assert_eq!(charset.len(), 2);
+        assert_eq!(extract(&context, Variable::ArgsPost(None)), vec!["UTF-8"]);
+        assert_eq!(extract(&context, Variable::Files), vec!["file-content"]);
+    }
+
+    #[test]
+    fn derives_request_body_processor() {
+        let headers = header_map(&[("content-type", "application/json")]);
+        let mut context = context(&headers);
+        context.set_body(b"{\"a\":1}");
+        assert_eq!(context.body_processor(), BodyProcessor::Json);
+        assert!(extract(&context, Variable::ArgsPost(None)).is_empty());
+        assert_eq!(extract(&context, Variable::ReqbodyProcessor), vec!["JSON"]);
+    }
+
+    #[test]
+    fn missing_content_type_defaults_to_urlencoded() {
+        let headers = header_map(&[]);
+        let mut context = context(&headers);
+        context.set_body(b"a=1&b=2");
+        assert_eq!(context.body_processor(), BodyProcessor::UrlEncoded);
+        assert_eq!(extract(&context, Variable::ArgsPost(None)), vec!["1", "2"]);
     }
 
     #[test]

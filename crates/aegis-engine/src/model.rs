@@ -139,6 +139,38 @@ pub enum Phase {
     Phase5,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyProcessor {
+    UrlEncoded,
+    Multipart,
+    Json,
+    Xml,
+    None,
+}
+
+impl BodyProcessor {
+    pub fn parse_name(raw: &str) -> Option<Self> {
+        match raw.to_ascii_lowercase().as_str() {
+            "urlencoded" => Some(Self::UrlEncoded),
+            "multipart" => Some(Self::Multipart),
+            "json" => Some(Self::Json),
+            "xml" => Some(Self::Xml),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::UrlEncoded => "URLENCODED",
+            Self::Multipart => "MULTIPART",
+            Self::Json => "JSON",
+            Self::Xml => "XML",
+            Self::None => "",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Variable {
     RequestUri,
@@ -159,6 +191,8 @@ pub enum Variable {
     RequestCookiesNames,
     RequestBody,
     RequestBodyLength,
+    MultipartPartHeaders(Option<Selector>),
+    ReqbodyProcessor,
     Files,
     FilesNames,
     FilesSizes,
@@ -204,6 +238,8 @@ impl Variable {
             Self::RequestCookiesNames => "REQUEST_COOKIES_NAMES".to_string(),
             Self::RequestBody => "REQUEST_BODY".to_string(),
             Self::RequestBodyLength => "REQUEST_BODY_LENGTH".to_string(),
+            Self::MultipartPartHeaders(selector) => selected("MULTIPART_PART_HEADERS", selector),
+            Self::ReqbodyProcessor => "REQBODY_PROCESSOR".to_string(),
             Self::Files => "FILES".to_string(),
             Self::FilesNames => "FILES_NAMES".to_string(),
             Self::FilesSizes => "FILES_SIZES".to_string(),
@@ -236,6 +272,7 @@ impl Variable {
             | Self::ArgsGet(selector)
             | Self::ArgsPost(selector)
             | Self::RequestCookies(selector)
+            | Self::MultipartPartHeaders(selector)
             | Self::Ip(selector)
             | Self::Session(selector)
             | Self::User(selector)
